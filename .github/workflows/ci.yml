@@ -1,0 +1,57 @@
+name: 🧪 CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  cancel-in-progress: true
+  group: ci-${{ github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests unitaires
+        run: cargo test --locked
+
+      # Suite d'ACCEPTATION : elle pilote le binaire compilé contre un faux Metabase qui reproduit
+      # les comportements du vrai (fusion de `details`, remise à zéro des champs absents d'un PUT,
+      # throttling des connexions). C'est elle qui a prouvé la parité avec l'implémentation Python
+      # d'origine ; elle doit rester verte, sans quoi la réécriture perd son filet.
+      - name: Suite d'acceptation
+        run: |
+          cargo build --locked
+          python3 tests/acceptance.py
+
+  image:
+    # Vérifie que l'image `scratch` se construit et démarre — une image qui ne peut pas se lancer
+    # échouerait sinon au premier déploiement, pas ici.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: metabase-datasource-sync:ci
+      - name: L'image démarre et refuse une configuration incomplète
+        run: |
+          set -o pipefail
+          docker run --rm metabase-datasource-sync:ci 2>&1 | tee /tmp/out || true
+          grep -q "CONFIGURATION INVALIDE" /tmp/out

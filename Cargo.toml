@@ -1,0 +1,23 @@
+[package]
+name = "metabase-datasource-sync"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Réconcilie les sources de données Metabase avec des credentials à rotation"
+license = "Apache-2.0"
+
+[dependencies]
+# Client HTTP bloquant : une requête toutes les 30 s, aucun besoin d'un runtime async.
+# `rustls` compile les certificats racines dans le binaire, ce qui permet une image `scratch`
+# sans bundle CA.
+ureq = { version = "3", features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"   # sans `preserve_order` : les clés restent triées, donc la sérialisation est canonique (empreinte stable)
+sha2 = "0.10"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

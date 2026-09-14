@@ -1,0 +1,69 @@
+name: 📦 Docker Release
+
+# Même déclencheur et même registre que les autres outils SocialGouv (cf. oblik) : `main` publie
+# une image de tête, un tag `vX.Y.Z` publie la version. Le chart consommateur, lui, épingle par
+# DIGEST — un tag reste mutable.
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  cancel-in-progress: true
+  group: docker-release-${{ github.ref_name }}
+
+jobs:
+  build-and-push-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          # arm64 inclus : les postes de développement et certains nœuds en sont, et le coût est
+          # marginal pour un binaire statique de moins de 2 Mo.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - name: Digest publié
+        run: |
+          echo "Image poussée. Digest à épingler dans le chart (values `image.digest`) :"
+          echo "${{ steps.push.outputs.digest }}"
