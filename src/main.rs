@@ -31,6 +31,23 @@ use datasource::DataSource;
 use metabase::Metabase;
 
 fn main() -> ExitCode {
+    match std::env::args().nth(1).as_deref() {
+        // L'image finale est un `scratch` : ce binaire est le SEUL exécutable disponible, donc
+        // c'est lui qui doit fournir la sonde de liveness du pod.
+        Some("--liveness") => return liveness(),
+        Some("--version") => {
+            println!("{}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some(other) => {
+            log_err(&format!(
+                "argument inconnu : {other} (attendu : aucun, --liveness ou --version)"
+            ));
+            return ExitCode::FAILURE;
+        }
+        None => {}
+    }
+
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(err) => {
@@ -40,6 +57,47 @@ fn main() -> ExitCode {
     };
     run(config);
     ExitCode::SUCCESS
+}
+
+/// Sonde de liveness : le heartbeat a-t-il été rafraîchi récemment ?
+///
+/// Un échec transitoire est rattrapé par la boucle, qui continue de rafraîchir le heartbeat ; un
+/// échec DURABLE le laisse vieillir, et c'est cette sonde qui le transforme en redémarrage visible.
+fn liveness() -> ExitCode {
+    let path = PathBuf::from(env_or("HEARTBEAT_FILE", "/tmp/alive"));
+    let max_age = match secs("LIVENESS_MAX_AGE_SECONDS", 900.0) {
+        Ok(duration) => duration,
+        Err(err) => {
+            log_err(&format!("CONFIGURATION INVALIDE : {err}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    match heartbeat_age(&path) {
+        Ok(age) if age <= max_age => ExitCode::SUCCESS,
+        Ok(age) => {
+            log_err(&format!(
+                "heartbeat vieux de {}s (seuil {}s) — aucune réconciliation aboutie depuis",
+                age.as_secs(),
+                max_age.as_secs()
+            ));
+            ExitCode::FAILURE
+        }
+        Err(err) => {
+            log_err(&format!("heartbeat illisible : {err}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn heartbeat_age(path: &PathBuf) -> Result<Duration, String> {
+    let modified = fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .map_err(|e| format!("{} : {}", path.display(), e))?;
+    // Une horloge qui recule ne doit pas faire passer la sonde pour fraîche par accident : on
+    // traite l'écart négatif comme un âge nul, ce qui est le cas favorable et reste honnête.
+    Ok(SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or(Duration::ZERO))
 }
 
 struct Config {

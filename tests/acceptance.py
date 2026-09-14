@@ -323,6 +323,38 @@ def scenario_failure_path():
     shutil.rmtree(work, ignore_errors=True)
 
 
+def scenario_liveness():
+    """L'image finale est un `scratch` : ce binaire est le seul exécutable disponible, donc c'est
+    lui qui porte la sonde de liveness du pod. Le chart en dépend."""
+    print("--- sonde de liveness ---")
+    work = tempfile.mkdtemp(prefix="mds-liveness-")
+    beat = os.path.join(work, "alive")
+    open(beat, "w").close()
+
+    def probe():
+        env = dict(os.environ)
+        env.update({"HEARTBEAT_FILE": beat, "LIVENESS_MAX_AGE_SECONDS": "60"})
+        return subprocess.run(IMPLEMENTATION + ["--liveness"], env=env,
+                              capture_output=True, text=True)
+
+    fresh = probe()
+    check("heartbeat frais -> sonde verte", fresh.returncode == 0, fresh.stderr[:200])
+
+    stale = time.time() - 120
+    os.utime(beat, (stale, stale))
+    old = probe()
+    check("heartbeat rassis -> sonde rouge", old.returncode != 0)
+    check("le motif de l'échec est explicite", "heartbeat vieux de" in old.stderr,
+          old.stderr[:200])
+
+    os.remove(beat)
+    missing = probe()
+    check("heartbeat absent -> sonde rouge", missing.returncode != 0)
+    check("l'absence est journalisée", "heartbeat illisible" in missing.stderr,
+          missing.stderr[:200])
+    shutil.rmtree(work, ignore_errors=True)
+
+
 if __name__ == "__main__":
     nominal_output = scenario_nominal()
     scenario_preserved_fields()
@@ -331,6 +363,7 @@ if __name__ == "__main__":
     scenario_local_drift()
     scenario_periodic()
     scenario_failure_path()
+    scenario_liveness()
     print("--- journal du réconciliateur (nominal) ---")
     print(nominal_output.strip())
     print("--- {} échec(s) ---".format(len(failures)))
