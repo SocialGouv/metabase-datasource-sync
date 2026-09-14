@@ -16,14 +16,11 @@ use std::path::Path;
 /// n'a pas bougé pendant la lecture.
 pub fn read_generation(directory: &Path) -> Result<BTreeMap<String, String>, String> {
     for _ in 0..3 {
-        let before = fs::canonicalize(directory)
-            .map_err(|e| format!("volume {} illisible : {}", directory.display(), e))?;
+        let before = generation(directory);
 
-        match read_all(&before) {
+        match read_all(directory) {
             Ok(files) => {
-                let after = fs::canonicalize(directory)
-                    .map_err(|e| format!("volume {} illisible : {}", directory.display(), e))?;
-                if after == before {
+                if generation(directory) == before {
                     return Ok(files);
                 }
             }
@@ -44,11 +41,23 @@ pub fn read_generation(directory: &Path) -> Result<BTreeMap<String, String>, Str
     ))
 }
 
+/// Identité de la génération publiée. Le kubelet la fait basculer en repointant le lien `..data`
+/// d'un coup ; c'est CE lien qu'il faut observer, pas le point de montage, qui ne bouge jamais.
+/// Hors Kubernetes (tests, montage à plat), l'absence de `..data` est un cas normal : on retombe
+/// sur un marqueur constant, et la vérification devient un non-événement.
+fn generation(directory: &Path) -> Option<std::path::PathBuf> {
+    fs::canonicalize(directory.join("..data")).ok()
+}
+
 fn read_all(directory: &Path) -> io::Result<BTreeMap<String, String>> {
     let mut files = BTreeMap::new();
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
-        if !entry.file_type()?.is_file() {
+        // 🪤 `entry.file_type()` décrit le LIEN, pas sa cible, et un Secret monté n'est qu'une
+        // forêt de liens symboliques (`PGUSER -> ..data/PGUSER`). Filtrer là-dessus écarte
+        // silencieusement toutes les clés. `Path::is_file()` suit le lien, lui — et écarte au
+        // passage `..data` et les répertoires de génération, qui pointent sur des répertoires.
+        if !entry.path().is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -69,6 +78,48 @@ mod tests {
     use super::*;
     use std::fs::File;
     use std::io::Write;
+
+    /// Reproduit la disposition RÉELLE d'un Secret monté par le kubelet : les clés sont des liens
+    /// symboliques vers `..data`, lui-même un lien vers le répertoire de la génération courante.
+    /// Un test qui écrit des fichiers ordinaires ne prouve rien de ce montage — c'est précisément
+    /// ce qui a laissé passer un filtre sur `DirEntry::file_type()`, lequel décrit le lien et non
+    /// sa cible, et écartait donc toutes les clés.
+    #[test]
+    fn lit_un_secret_monte_comme_le_kubelet() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("mds-kubelet-{}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        let generation = dir.join("..2026_09_14_15_00_00.123456789");
+        fs::create_dir_all(&generation).unwrap();
+        write!(
+            File::create(generation.join("PGUSER")).unwrap(),
+            "v-reader-aaaa"
+        )
+        .unwrap();
+        write!(
+            File::create(generation.join("PGPASSWORD")).unwrap(),
+            "s3cret"
+        )
+        .unwrap();
+        symlink(&generation, dir.join("..data")).unwrap();
+        symlink("..data/PGUSER", dir.join("PGUSER")).unwrap();
+        symlink("..data/PGPASSWORD", dir.join("PGPASSWORD")).unwrap();
+
+        let files = read_generation(&dir).unwrap();
+        assert_eq!(
+            files.get("PGUSER").map(String::as_str),
+            Some("v-reader-aaaa")
+        );
+        assert_eq!(files.get("PGPASSWORD").map(String::as_str), Some("s3cret"));
+        // Les entrées internes du kubelet ne doivent pas être prises pour des clés.
+        assert!(
+            !files.contains_key("..data"),
+            "..data pris pour une clé : {files:?}"
+        );
+        assert_eq!(files.len(), 2, "clés inattendues : {files:?}");
+        fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn lit_les_cles_sans_la_newline_finale() {
