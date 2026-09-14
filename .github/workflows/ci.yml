@@ -36,6 +36,43 @@ jobs:
           cargo build --locked
           python3 tests/acceptance.py
 
+  # Acceptation contre un VRAI Metabase et un VRAI PostgreSQL. La suite ci-dessus pilote un faux
+  # Metabase : elle vérifie le comportement du programme, pas le contrat réel de l'API — or ce
+  # contrat bouge d'une version à l'autre. Bumper l'image ci-dessous est la façon de détecter cette
+  # dérive AVANT de la découvrir en production.
+  acceptance-reelle:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: app
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      metabase:
+        # `MB_ENCRYPTION_SECRET_KEY` posée comme en production : c'est ce qui rend `details`
+        # chiffré, donc ce qui interdit toute écriture SQL directe et justifie ce programme.
+        image: metabase/metabase:v0.63.15
+        env:
+          MB_ENCRYPTION_SECRET_KEY: cle-de-test-suffisamment-longue-pour-metabase
+        ports: ["3000:3000"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --locked
+      - name: Scénario réel (création, requête SQL, rotation, requête après rotation)
+        env:
+          MB_URL: http://localhost:3000
+          # Metabase est un conteneur du même réseau : il joint PostgreSQL par son nom de service,
+          # tandis que le script y accède par le port publié sur le runner.
+          PG_HOST_FOR_METABASE: postgres
+          PG_LOCAL: localhost
+          PG_LOCAL_PORT: "5432"
+        run: python3 tests/real_metabase.py
+
   image:
     # Vérifie que l'image `scratch` se construit et démarre — une image qui ne peut pas se lancer
     # échouerait sinon au premier déploiement, pas ici.

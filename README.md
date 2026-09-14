@@ -102,10 +102,23 @@ ces variables, monte les Secrets en volume et câble la sonde de liveness sur le
 ## Développement
 
 ```sh
-cargo test            # tests unitaires
-cargo build           # binaire de développement
-python3 tests/acceptance.py   # suite d'acceptation contre un faux Metabase
+cargo test                     # tests unitaires
+cargo build                    # binaire de développement
+python3 tests/acceptance.py    # acceptation contre un faux Metabase (rapide)
+python3 tests/real_metabase.py # acceptation contre un VRAI Metabase (cf. ci-dessous)
 docker build -t metabase-datasource-sync .
+```
+
+`real_metabase.py` attend une instance Metabase et un PostgreSQL joignables ; la CI les fournit en
+services. En local :
+
+```sh
+docker network create mds-test
+docker run -d --name mds-pg --network mds-test -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=app -p 55432:5432 postgres:16-alpine
+docker run -d --name mds-metabase --network mds-test -p 3000:3000 \
+  -e MB_ENCRYPTION_SECRET_KEY=une-cle-de-test-suffisamment-longue metabase/metabase:v0.63.15
+PG_HOST_FOR_METABASE=mds-pg PG_LOCAL_PORT=55432 python3 tests/real_metabase.py
 ```
 
 La **suite d'acceptation** décrit un comportement, pas une implémentation : elle pilote le binaire
