@@ -76,9 +76,10 @@ DS0_KEYS='{"host":"PGHOST","port":"PGPORT","dbname":"PGDATABASE","user":"PGUSER"
 DS0_EXTRA='{"ssl":true,"tunnel-enabled":false}'
 ```
 
-Sur Kubernetes, le déploiement est fourni par le chart Helm
-[`metabase-datasource-sync`](https://pic.sg.social.gouv.fr/socialgouv/produits-dnum/studio-tech/devops/charts)
-(dossier `dnum/metabase-datasource-sync`), qui pose ces variables et monte les Secrets.
+Sur Kubernetes, le déploiement est fourni par un chart Helm `metabase-datasource-sync` qui pose
+ces variables, monte les Secrets en volume et câble la sonde de liveness sur le heartbeat.
+*(Pour la DNUM : il vit dans le dépôt de charts transverses, dossier
+`dnum/metabase-datasource-sync`.)*
 
 > ⚠️ **Les droits d'une source NEUVE sont ceux de Metabase, pas les vôtres.** Créer une source
 > donne aux groupes Metabase existants les permissions que Metabase applique par défaut — elles
