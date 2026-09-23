@@ -29,17 +29,20 @@
   //   cargo (Cargo.toml + Cargo.lock) · dockerfile (le FROM de l'image de build) ·
   //   github-actions (les `uses:` ET les images de `services:`, `metabase/metabase` et `postgres`
   //   compris — le manager les extrait nativement, vérifié dans sa source) ·
-  //   rust-toolchain (le `channel` de rust-toolchain.toml) · devbox (devbox.json/devbox.lock).
+  //   devbox (devbox.json/devbox.lock).
   //
-  // Le seul manager maison sert au trou qu'aucun natif ne voit : `rust-version` dans Cargo.toml.
-  // Le manager `cargo` lit les dépendances, pas le plancher du compilateur.
+  // Le manager maison ci-dessous porte les deux déclarations du plancher Rust qui ne sont pas un
+  // `FROM` : `rust-version` dans Cargo.toml (le manager `cargo` lit les dépendances, pas le
+  // plancher du compilateur) et le `channel` de rust-toolchain.toml. Il les lit par la datasource
+  // `docker`, LA MÊME que celle du `FROM rust:` du Dockerfile — c'est ce qui les accorde.
   customManagers: [
     {
       customType: "regex",
-      description: "Le plancher MSRV déclaré dans Cargo.toml, qu'aucun manager natif ne lit",
-      managerFilePatterns: ["/^Cargo\\.toml$/"],
+      description: "Plancher Rust de Cargo.toml et canal de rust-toolchain.toml, sur la datasource du FROM du Dockerfile",
+      managerFilePatterns: ["/^Cargo\\.toml$/", "/^rust-toolchain\\.toml$/"],
       matchStrings: [
         "rust-version\\s*=\\s*[\"'](?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)[\"']",
+        "channel\\s*=\\s*[\"'](?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)[\"']",
       ],
       depNameTemplate: "rust",
       datasourceTemplate: "docker",
@@ -48,19 +51,32 @@
   ],
   packageRules: [
     {
+      // Le manager natif `rust-toolchain` lit bien le canal, mais par la datasource `rust-version`,
+      // qui RETARDE : le 23/09/2026 elle proposait 1.97.1 quand Rust 1.98.1 était publié
+      // (static.rust-lang.org) et que `docker` proposait 1.98. Mesuré en dry run : les trois
+      // déclarations tombaient sur une seule branche, mais pas sur la même version, et
+      // `task msrv` rougissait sur la PR par construction. D'où une seule datasource pour les
+      // trois, et ce manager-là éteint.
+      description: "Une seule datasource pour le plancher Rust — sinon les trois divergent",
+      matchManagers: ["rust-toolchain"],
+      enabled: false,
+    },
+    {
       // LE point qui décide si ce dépôt peut se maintenir seul.
       //
       // Le plancher de Rust est déclaré à TROIS endroits — `rust-version` dans Cargo.toml, le
       // `channel` de rust-toolchain.toml, le `FROM rust:<X.Y>-alpine` du Dockerfile — et
-      // `task msrv` refuse qu'ils divergent. Trois managers différents les voient
-      // (custom, rust-toolchain, dockerfile), donc sans ce groupement Renovate ouvrirait deux ou
-      // trois PR dont chacune, seule, fait rougir la porte. Un même `depName: rust` les réunit.
+      // `task msrv` refuse qu'ils divergent. Deux managers les voient (le manager maison pour
+      // Cargo.toml et rust-toolchain.toml, `dockerfile` pour le FROM), donc sans ce groupement
+      // Renovate ouvrirait des PR dont chacune, seule, fait rougir la porte. Un même
+      // `depName: rust` les réunit ; la datasource commune, plus haut, les accorde.
       //
-      // Si ce groupement casse un jour, ça ne passe pas en silence : `task msrv` rougit sur la PR.
-      // C'est le témoin, et il est déjà requis par le ruleset.
+      // Le groupement est NÉCESSAIRE, pas suffisant — mesuré : groupés mais sur deux datasources,
+      // ils atterrissaient sur une seule branche avec deux versions. Si l'accord casse un jour, ça
+      // ne passe pas en silence : `task msrv` rougit sur la PR. C'est le témoin, déjà requis.
       description: "Le plancher Rust bouge d'un seul tenant (Cargo.toml + rust-toolchain.toml + Dockerfile)",
       matchPackageNames: ["rust"],
-      groupName: "plancher Rust (MSRV)",
+      groupName: "plancher Rust MSRV",
       commitMessageTopic: "le plancher Rust",
     },
     {
