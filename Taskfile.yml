@@ -1,0 +1,82 @@
+# https://taskfile.dev — TOUTES les commandes du dépôt, définies une seule fois.
+#
+# `devbox run -- task <nom>`, ou `task <nom>` dans un shell devbox/direnv. `task --list` les liste.
+# La CI appelle CES cibles : une commande qui vit à la fois ici, dans .github/workflows et dans la
+# tête de quelqu'un finit par diverger — et c'est alors le vert de la CI qui ment.
+version: "3"
+
+vars:
+  IMAGE: metabase-datasource-sync:dev
+
+env:
+  DOCKER_BUILDKIT: "1"
+
+tasks:
+  default:
+    desc: liste les cibles
+    cmds:
+      - task --list
+    silent: true
+
+  fmt:
+    desc: reformate le code
+    cmds:
+      - cargo fmt --all
+
+  fmt:check:
+    desc: le formatage est conforme
+    cmds:
+      - cargo fmt --all -- --check
+
+  clippy:
+    desc: clippy sur toutes les cibles, tout avertissement est une erreur
+    cmds:
+      - cargo clippy --all-targets -- -D warnings
+
+  build:
+    desc: compile le binaire de développement (target/debug)
+    cmds:
+      - cargo build --locked
+
+  test:unit:
+    desc: tests unitaires
+    cmds:
+      - cargo test --locked
+
+  acceptance:
+    desc: acceptation contre un FAUX Metabase — pilote le binaire compilé (rapide)
+    deps: [build]
+    cmds:
+      - python3 tests/acceptance.py
+
+  acceptance:real:
+    desc: acceptation contre un VRAI Metabase + PostgreSQL (cf. README, « Développement »)
+    deps: [build]
+    cmds:
+      - python3 tests/real_metabase.py
+
+  test:
+    desc: la boucle courte du développeur — unitaires + acceptation
+    cmds:
+      - task: test:unit
+      - task: acceptance
+
+  msrv:
+    desc: le plancher de Rust déclaré est vrai, et déclaré partout pareil
+    cmds:
+      - python3 hack/check-msrv.py
+
+  image:
+    desc: construit l'image et vérifie qu'elle démarre et refuse une configuration incomplète
+    cmds:
+      - docker build -t {{.IMAGE}} .
+      - sh hack/check-image.sh {{.IMAGE}}
+
+  check:
+    desc: LA porte — exactement ce que le job `test` de la CI exécute
+    cmds:
+      - task: msrv
+      - task: fmt:check
+      - task: clippy
+      - task: test:unit
+      - task: acceptance

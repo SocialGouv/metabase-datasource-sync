@@ -2,7 +2,10 @@
 name = "metabase-datasource-sync"
 version = "0.2.3"
 edition = "2021"
-rust-version = "1.75"
+# Plancher réel de l'arbre de dépendances (le plus haut des `rust-version` verrouillés : les crates
+# `icu_*` 2.3 et `time` 0.3), et version du canal épinglé dans `rust-toolchain.toml` : le contrat
+# déclaré est celui qui compile. `task msrv` vérifie qu'ils ne divergent pas.
+rust-version = "1.88"
 description = "Réconcilie les sources de données Metabase avec des credentials à rotation"
 license = "Apache-2.0"
 

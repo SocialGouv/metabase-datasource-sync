@@ -101,16 +101,30 @@ ces variables, monte les Secrets en volume et câble la sonde de liveness sur le
 
 ## Développement
 
+La chaîne d'outils vient de [devbox](https://www.jetify.com/devbox) et toutes les commandes du
+dépôt vivent dans le `Taskfile.yml` — c'est aussi ce que la CI lance, mot pour mot :
+
 ```sh
-cargo test                     # tests unitaires
-cargo build                    # binaire de développement
-python3 tests/acceptance.py    # acceptation contre un faux Metabase (rapide)
-python3 tests/real_metabase.py # acceptation contre un VRAI Metabase (cf. ci-dessous)
-docker build -t metabase-datasource-sync .
+devbox install                 # rustup, task, python3 (versions épinglées)
+devbox run -- task             # liste les cibles
+devbox run -- task check       # LA porte : msrv, format, clippy, unitaires, acceptation
+devbox run -- task test        # boucle courte : unitaires + acceptation
+devbox run -- task image       # construit l'image et vérifie qu'elle démarre
 ```
 
-`real_metabase.py` attend une instance Metabase et un PostgreSQL joignables ; la CI les fournit en
-services. En local :
+Avec [direnv](https://direnv.net/) (`devbox generate direnv`), le préfixe `devbox run --` disparaît.
+
+La version de Rust n'est pas choisie par devbox : elle est nommée dans `rust-toolchain.toml`, que
+rustup lit sur le poste **et** sur le runner de CI, et l'image de build du `Dockerfile` la suit.
+Le compilateur qui construit le binaire publié est donc celui que la CI a éprouvé.
+
+`task msrv` garde les deux moitiés du contrat : que ces trois déclarations et le `rust-version` de
+`Cargo.toml` s'accordent, **et** qu'aucune dépendance verrouillée ne réclame plus récent. La
+seconde n'est pas donnée par l'épinglage : avec le resolver v2, le `rust-version` d'une dépendance
+est indicatif, et un canal 1.85 compile sans broncher un arbre qui déclare 1.88.
+
+`task acceptance:real` attend une instance Metabase et un PostgreSQL joignables ; la CI les fournit
+en services. En local :
 
 ```sh
 docker network create mds-test
@@ -118,7 +132,7 @@ docker run -d --name mds-pg --network mds-test -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=app -p 55432:5432 postgres:16-alpine
 docker run -d --name mds-metabase --network mds-test -p 3000:3000 \
   -e MB_ENCRYPTION_SECRET_KEY=une-cle-de-test-suffisamment-longue metabase/metabase:v0.63.15
-PG_HOST_FOR_METABASE=mds-pg PG_LOCAL_PORT=55432 python3 tests/real_metabase.py
+PG_HOST_FOR_METABASE=mds-pg PG_LOCAL_PORT=55432 devbox run -- task acceptance:real
 ```
 
 La **suite d'acceptation** décrit un comportement, pas une implémentation : elle pilote le binaire
