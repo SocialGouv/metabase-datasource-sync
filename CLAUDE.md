@@ -64,19 +64,31 @@ refus sont la fonctionnalité ; ne pas les « assouplir » pour faire passer un 
 Le dépôt entre dans la boucle d'auto-maintenance (épique iterion **#1585**, ticket **#1597**).
 Dans l'ordre, et l'ordre est contraint :
 
-1. **Pas de ruleset sur `main`.** À poser : PR obligatoire, `test` + `acceptance-reelle` + `image`
-   requis, fraîcheur de la base (`strict`) — le dépôt a zéro PR à ce jour, donc aucune raison de
-   commencer plus laxiste.
-2. **Pas de Renovate.** Le dépôt doit être **ajouté** à l'installation de l'App
+1. **Pas de Renovate.** Le dépôt doit être **ajouté** à l'installation de l'App
    `socialgouv-renovate` (`repository_selection: selected`) et ses deux secrets créés. La conf
    voudra le manager `cargo` natif plus un manager maison pour l'image Metabase épinglée dans
    `ci.yml` et pour l'image de build du `Dockerfile`.
-3. **Les actions ne sont pas épinglées par SHA.** À faire avec Renovate, qui sait les maintenir —
+2. **Les actions ne sont pas épinglées par SHA.** À faire avec Renovate, qui sait les maintenir —
    les épingler à la main sans lui donnerait des versions figées pour toujours.
-4. **Pas d'intégration iterion.** Dans cet ordre : un premier verdict vert, **puis**
+3. **Pas d'intégration iterion.** Dans cet ordre : un premier verdict vert, **puis**
    `revi/review` requis, **puis** l'observer bloquer une révision neuve, **puis** armer
    l'automerge — jamais l'inverse. Un gate mal aligné avec un automerge armé est un trou, pas une
    demi-mesure.
+
+## `main` est protégé
+
+Ruleset `23870489`, actif : PR obligatoire (0 approbation requise — c'est la CI qui juge),
+`test` + `acceptance-reelle` + `image` requis, **`strict`** (la branche doit être à jour avant
+merge), suppression et *non-fast-forward* interdits. Seul bypass : le rôle **admin**. Le dépôt a
+`allow_update_branch: true`, sans quoi `strict` coûterait un rebase manuel à chaque PR.
+
+`strict` plutôt qu'une merge queue : le dépôt n'avait aucune PR avant celle-ci, donc deux PR
+simultanées — le cas que la queue protège — n'arrivent pas. Coût assumé : chaque rebase produit un
+nouveau head, donc une nouvelle exécution de la CI.
+
+`revi/review` n'y est **pas** encore, et c'est l'ordre du ticket #1597 : un premier verdict vert
+d'abord, le rendre requis ensuite, l'observer bloquer une révision neuve, et seulement après armer
+l'automerge.
 
 ## Le chemin de release est fermé
 
