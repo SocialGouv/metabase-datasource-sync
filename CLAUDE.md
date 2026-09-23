@@ -64,21 +64,33 @@ refus sont la fonctionnalité ; ne pas les « assouplir » pour faire passer un 
 Le dépôt entre dans la boucle d'auto-maintenance (épique iterion **#1585**, ticket **#1597**).
 Dans l'ordre, et l'ordre est contraint :
 
-1. **Les tags échappent à la CI.** `ci.yml` ne tourne pas sur un tag, et un ruleset sur `main` ne
-   protège pas les tags : un `vX.Y.Z` posé sur n'importe quel commit publie une image que rien n'a
-   éprouvée. L'accord tag ↔ `Cargo.toml` ne dit rien de la CI. À régler : éprouver les checks sur
-   les tags, ou vérifier l'ascendance du tag sur un commit mergé et vert — plus une procédure de
-   release écrite, la version ayant toujours été bumpée par poussée directe.
-2. **Pas de ruleset sur `main`.** À poser : PR obligatoire, `test` + `acceptance-reelle` + `image`
+1. **Pas de ruleset sur `main`.** À poser : PR obligatoire, `test` + `acceptance-reelle` + `image`
    requis, fraîcheur de la base (`strict`) — le dépôt a zéro PR à ce jour, donc aucune raison de
    commencer plus laxiste.
-3. **Pas de Renovate.** Le dépôt doit être **ajouté** à l'installation de l'App
+2. **Pas de Renovate.** Le dépôt doit être **ajouté** à l'installation de l'App
    `socialgouv-renovate` (`repository_selection: selected`) et ses deux secrets créés. La conf
    voudra le manager `cargo` natif plus un manager maison pour l'image Metabase épinglée dans
    `ci.yml` et pour l'image de build du `Dockerfile`.
-4. **Les actions ne sont pas épinglées par SHA.** À faire avec Renovate, qui sait les maintenir —
+3. **Les actions ne sont pas épinglées par SHA.** À faire avec Renovate, qui sait les maintenir —
    les épingler à la main sans lui donnerait des versions figées pour toujours.
-5. **Pas d'intégration iterion.** Dans cet ordre : un premier verdict vert, **puis**
+4. **Pas d'intégration iterion.** Dans cet ordre : un premier verdict vert, **puis**
    `revi/review` requis, **puis** l'observer bloquer une révision neuve, **puis** armer
    l'automerge — jamais l'inverse. Un gate mal aligné avec un automerge armé est un trou, pas une
    demi-mesure.
+
+## Le chemin de release est fermé
+
+Il l'était : `ci.yml` ne tourne pas sur un tag et une protection de `main` ne protège pas les
+tags, donc un `git tag` sur n'importe quel commit publiait une image que rien n'avait éprouvée.
+Le job `tag-eprouve` refuse désormais un tag dont le commit n'est pas sur `main`, ou dont les
+checks requis ne sont pas verts **sur ce commit précis** — un bypass d'administrateur pouvant
+poser sur `main` un commit qui ne les a pas payés.
+
+Le garde ne concerne **que les tags** : une poussée sur `main` produit un commit neuf (squash)
+dont la CI démarre au même instant, et exiger ses checks bloquerait chaque merge.
+
+Quand plusieurs exécutions portent le même nom (re-run), c'est la plus **récente** qui décide,
+triée sur `started_at` : l'ordre de la réponse de l'API n'est pas un fait, la date en est un.
+
+La procédure, avec le `task release:check` qui rejoue le contrôle en local, est dans le
+[README](README.md#publier-une-version).

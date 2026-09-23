@@ -72,6 +72,11 @@ tasks:
       - docker build -t {{.IMAGE}} .
       - sh hack/check-image.sh {{.IMAGE}}
 
+  release:check:
+    desc: "un commit est-il publiable ? (sur main + checks requis verts) — task release:check -- <sha>"
+    cmds:
+      - sh hack/check-release-commit.sh {{.CLI_ARGS}}
+
   check:
     desc: LA porte — exactement ce que le job `test` de la CI exécute
     cmds:
