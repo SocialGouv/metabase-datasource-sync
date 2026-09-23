@@ -238,7 +238,7 @@ fn run(config: Config) {
             }
         }
 
-        let due = last_full.map_or(true, |at| at.elapsed() >= config.reconcile);
+        let due = last_full.is_none_or(|at| at.elapsed() >= config.reconcile);
         let drifted = wanted.iter().any(|(idx, details)| {
             let engine = &config.sources[*idx].engine;
             pushed.get(idx) != Some(&datasource::fingerprint(engine, details))
@@ -341,7 +341,7 @@ fn reconcile_one(
     let remote_drift = datasource::remote_drift(existing.get("details"), want);
     let local_drift = pushed.get(&idx) != Some(&fingerprint);
     if remote_drift.is_empty() && !local_drift {
-        log(&format!("[{}] à jour (user {})", display_name, user));
+        log(&format!("[{display_name}] à jour (user {user})"));
         return Ok(());
     }
 
@@ -376,8 +376,7 @@ fn reconcile_one(
         remote_drift.join(",")
     };
     log(&format!(
-        "[{}] réécrite ({}) -> user {}",
-        display_name, reason, user
+        "[{display_name}] réécrite ({reason}) -> user {user}"
     ));
     Ok(())
 }
