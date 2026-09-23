@@ -1,0 +1,61 @@
+name: renovate
+
+# Renovate AUTO-HÉBERGÉ. L'app Mend hébergée est installée sur l'org (« all repos ») mais n'a plus
+# produit une seule PR nulle part dans SocialGouv depuis fin novembre 2025 — les mises à jour de
+# dépendances s'y sont donc arrêtées en silence. Ce workflow exécute Renovate nous-mêmes pour ce
+# dépôt, sans dépendre du service hébergé. La configuration vit dans .github/renovate.json5.
+#
+# Renovate s'authentifie avec l'App dédiée « SocialGouv Renovate » et NON avec GITHUB_TOKEN : les
+# PR ouvertes par GITHUB_TOKEN ne déclenchent pas les autres workflows, donc leur CI ne partirait
+# jamais — or c'est précisément la CI qui décide si un bump est acceptable ici. Sous l'App,
+# l'auteur des PR est socialgouv-renovate[bot], la CI se déclenche normalement, et cette identité
+# dédiée est ce qui permet en aval de distinguer une PR de dépendances d'une PR humaine.
+on:
+  schedule:
+    - cron: "0 3 * * 1" # lundi 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: "Dry run : journalise ce qui serait fait, ne crée rien"
+        type: boolean
+        default: false
+      logLevel:
+        description: "Niveau de log"
+        type: choice
+        options: [info, debug]
+        default: info
+
+permissions:
+  contents: write # branches de mise à jour
+  pull-requests: write # ouverture/màj des PR
+
+concurrency:
+  group: renovate
+  cancel-in-progress: false
+
+jobs:
+  renovate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          # `client-id` accepte aussi bien l'App ID numérique que le Client ID : l'action lit
+          # `getInput("client-id") || getInput("app-id")` et passe la valeur telle quelle à
+          # `createAppAuth({ appId })`, que GitHub accepte comme `iss` d'un JWT sous les deux
+          # formes. Le secret reste donc RENOVATE_APP_ID ; seule la clé d'entrée change, `app-id`
+          # étant déprécié (deux warnings par run).
+          client-id: ${{ secrets.RENOVATE_APP_ID }}
+          private-key: ${{ secrets.RENOVATE_APP_PRIVATE_KEY }}
+      - uses: renovatebot/github-action@1a96852b0384df1837619d04c60b2d10d1f9ff08 # v46.1.21
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+        env:
+          RENOVATE_PLATFORM: github
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          # La config vit dans le dépôt : ne jamais ouvrir de PR d'onboarding, et échouer
+          # bruyamment si elle venait à disparaître plutôt que de tourner sur des défauts.
+          RENOVATE_ONBOARDING: "false"
+          RENOVATE_REQUIRE_CONFIG: "required"
+          RENOVATE_DRY_RUN: ${{ inputs.dryRun && 'full' || '' }}
+          LOG_LEVEL: ${{ inputs.logLevel || 'info' }}

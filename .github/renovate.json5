@@ -1,0 +1,84 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    // Défauts de l'org SocialGouv : fenêtre de maintenance, groupements dev/deploy.
+    "github>SocialGouv/renovate-config",
+    ":dependencyDashboard",
+    ":semanticCommits", // les titres de PR suivent la convention de commit du dépôt
+  ],
+  // Délai de décantation : une version doit être publique depuis 14 jours avant de devenir une PR.
+  // Ça couvre la fenêtre pendant laquelle une publication compromise ou ratée est rétractée.
+  // `strict` fait ATTENDRE Renovate au lieu d'ouvrir une PR dont le contrôle interne est encore en
+  // cours — il retient la PULL REQUEST, pas la branche.
+  minimumReleaseAge: "14 days",
+  internalChecksFilter: "strict",
+  // Le délai ci-dessus rend le flux de mises à jour INVISIBLE : sans tableau de bord, « rien à
+  // faire » ne se distingue pas de « retenu en silence ». Le preset de l'org pose
+  // `dependencyDashboardAutoclose: true` ; le garder ouvert est ce qui rend la file lisible.
+  dependencyDashboardAutoclose: false,
+  // Une CVE connue est le seul cas où attendre est le plus grand risque : les mises à jour de
+  // sécurité contournent le délai. Deux sources indépendantes alimentent cette branche : osv.dev
+  // (dépendances directes) et les alertes Dependabot de GitHub, qui exigent que l'App Renovate
+  // tienne « Dependabot alerts: read ». Retirer cette permission rétrécirait l'exemption à osv.dev
+  // en silence au lieu d'échouer.
+  osvVulnerabilityAlerts: true,
+  vulnerabilityAlerts: {
+    minimumReleaseAge: null,
+  },
+  // Les managers natifs couvrent déjà tout ce qui a un verrou ou un épinglage standard :
+  //   cargo (Cargo.toml + Cargo.lock) · dockerfile (le FROM de l'image de build) ·
+  //   github-actions (les `uses:` ET les images de `services:`, `metabase/metabase` et `postgres`
+  //   compris — le manager les extrait nativement, vérifié dans sa source) ·
+  //   rust-toolchain (le `channel` de rust-toolchain.toml) · devbox (devbox.json/devbox.lock).
+  //
+  // Le seul manager maison sert au trou qu'aucun natif ne voit : `rust-version` dans Cargo.toml.
+  // Le manager `cargo` lit les dépendances, pas le plancher du compilateur.
+  customManagers: [
+    {
+      customType: "regex",
+      description: "Le plancher MSRV déclaré dans Cargo.toml, qu'aucun manager natif ne lit",
+      managerFilePatterns: ["/^Cargo\\.toml$/"],
+      matchStrings: [
+        "rust-version\\s*=\\s*[\"'](?<currentValue>\\d+\\.\\d+(?:\\.\\d+)?)[\"']",
+      ],
+      depNameTemplate: "rust",
+      datasourceTemplate: "docker",
+      versioningTemplate: "docker",
+    },
+  ],
+  packageRules: [
+    {
+      // LE point qui décide si ce dépôt peut se maintenir seul.
+      //
+      // Le plancher de Rust est déclaré à TROIS endroits — `rust-version` dans Cargo.toml, le
+      // `channel` de rust-toolchain.toml, le `FROM rust:<X.Y>-alpine` du Dockerfile — et
+      // `task msrv` refuse qu'ils divergent. Trois managers différents les voient
+      // (custom, rust-toolchain, dockerfile), donc sans ce groupement Renovate ouvrirait deux ou
+      // trois PR dont chacune, seule, fait rougir la porte. Un même `depName: rust` les réunit.
+      //
+      // Si ce groupement casse un jour, ça ne passe pas en silence : `task msrv` rougit sur la PR.
+      // C'est le témoin, et il est déjà requis par le ruleset.
+      description: "Le plancher Rust bouge d'un seul tenant (Cargo.toml + rust-toolchain.toml + Dockerfile)",
+      matchPackageNames: ["rust"],
+      groupName: "plancher Rust (MSRV)",
+      commitMessageTopic: "le plancher Rust",
+    },
+    {
+      // Remonter le plancher du compilateur n'est pas une mise à jour de dépendance : c'est une
+      // décision qui exclut des consommateurs. Elle se prend quand une dépendance l'exige, pas
+      // parce qu'une version existe. La PR est donc ouverte pour être VUE, jamais fusionnée seule.
+      description: "Le plancher Rust ne se fusionne pas automatiquement",
+      matchPackageNames: ["rust"],
+      automerge: false,
+      minimumReleaseAge: "60 days",
+    },
+    {
+      // L'image Metabase est le contrat que ce programme pilote. Son bump est exactement ce que la
+      // suite `acceptance-reelle` existe pour éprouver — elle tourne contre le VRAI Metabase, donc
+      // une dérive d'API rougit ici plutôt qu'en production.
+      description: "Metabase : le bump que l'acceptation réelle doit éprouver",
+      matchPackageNames: ["metabase/metabase"],
+      commitMessageTopic: "l'image Metabase de l'acceptation réelle",
+    },
+  ],
+}
