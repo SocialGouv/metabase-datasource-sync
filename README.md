@@ -101,16 +101,30 @@ ces variables, monte les Secrets en volume et câble la sonde de liveness sur le
 
 ## Développement
 
+La chaîne d'outils vient de [devbox](https://www.jetify.com/devbox) et toutes les commandes du
+dépôt vivent dans le `Taskfile.yml` — c'est aussi ce que la CI lance, mot pour mot :
+
 ```sh
-cargo test                     # tests unitaires
-cargo build                    # binaire de développement
-python3 tests/acceptance.py    # acceptation contre un faux Metabase (rapide)
-python3 tests/real_metabase.py # acceptation contre un VRAI Metabase (cf. ci-dessous)
-docker build -t metabase-datasource-sync .
+devbox install                 # rustup, task, python3 (versions épinglées)
+devbox run -- task             # liste les cibles
+devbox run -- task check       # LA porte : msrv, format, clippy, unitaires, acceptation
+devbox run -- task test        # boucle courte : unitaires + acceptation
+devbox run -- task image       # construit l'image et vérifie qu'elle démarre
 ```
 
-`real_metabase.py` attend une instance Metabase et un PostgreSQL joignables ; la CI les fournit en
-services. En local :
+Avec [direnv](https://direnv.net/) (`devbox generate direnv`), le préfixe `devbox run --` disparaît.
+
+La version de Rust n'est pas choisie par devbox : elle est nommée dans `rust-toolchain.toml`, que
+rustup lit sur le poste **et** sur le runner de CI, et l'image de build du `Dockerfile` la suit.
+Le compilateur qui construit le binaire publié est donc celui que la CI a éprouvé.
+
+`task msrv` garde les deux moitiés du contrat : que ces trois déclarations et le `rust-version` de
+`Cargo.toml` s'accordent, **et** qu'aucune dépendance verrouillée ne réclame plus récent. La
+seconde n'est pas donnée par l'épinglage : avec le resolver v2, le `rust-version` d'une dépendance
+est indicatif, et un canal 1.85 compile sans broncher un arbre qui déclare 1.88.
+
+`task acceptance:real` attend une instance Metabase et un PostgreSQL joignables ; la CI les fournit
+en services. En local :
 
 ```sh
 docker network create mds-test
@@ -118,7 +132,7 @@ docker run -d --name mds-pg --network mds-test -e POSTGRES_PASSWORD=postgres \
   -e POSTGRES_DB=app -p 55432:5432 postgres:16-alpine
 docker run -d --name mds-metabase --network mds-test -p 3000:3000 \
   -e MB_ENCRYPTION_SECRET_KEY=une-cle-de-test-suffisamment-longue metabase/metabase:v0.63.15
-PG_HOST_FOR_METABASE=mds-pg PG_LOCAL_PORT=55432 python3 tests/real_metabase.py
+PG_HOST_FOR_METABASE=mds-pg PG_LOCAL_PORT=55432 devbox run -- task acceptance:real
 ```
 
 La **suite d'acceptation** décrit un comportement, pas une implémentation : elle pilote le binaire
@@ -133,3 +147,34 @@ SYNC_CMD=/chemin/vers/une/autre/implementation python3 tests/acceptance.py
 
 C'est ainsi qu'a été prouvée la parité de ce binaire avec l'implémentation Python d'origine
 (0.1.0) : **les 41 mêmes assertions, le même journal**.
+
+## Publier une version
+
+Une image publiée doit être un commit que la CI a éprouvé. Ça ne va pas de soi ici : `ci.yml` ne
+tourne **pas** sur un tag, et une protection posée sur `main` ne protège **pas** les tags — un
+`git tag` sur n'importe quel commit suffirait sinon à publier n'importe quoi. Le job `tag-eprouve`
+de `docker-release.yaml` refuse donc de publier un tag dont le commit n'est pas sur `main` ou dont
+les checks requis ne sont pas verts **sur ce commit précis**.
+
+La version n'est plus bumpée par poussée directe : elle passe par une PR, comme le reste.
+
+1. **La PR de version** — bumper `version` dans `Cargo.toml`, puis régénérer le lock :
+   ```sh
+   devbox run -- cargo update --workspace --offline   # ou `cargo build --locked` qui échouera et dira quoi faire
+   ```
+   `Cargo.lock` doit suivre : le `Dockerfile` construit avec `--locked` et refuse un lock en
+   retard. Ouvrir la PR, la faire passer.
+2. **Attendre la CI de `main`.** Le merge produit un commit neuf dont la CI démarre à cet
+   instant ; un tag posé avant qu'elle finisse sera **refusé**, et c'est voulu.
+3. **Vérifier avant de taguer** — le même contrôle que la CI, en local :
+   ```sh
+   devbox run -- task release:check -- $(git rev-parse origin/main)
+   ```
+4. **Taguer et pousser** :
+   ```sh
+   git tag v0.2.4 origin/main && git push origin v0.2.4
+   ```
+   Le tag doit correspondre au `version` de `Cargo.toml` — un autre garde, plus ancien, refuse de
+   publier un binaire dont le `--version` mentirait.
+5. **Épingler par digest chez le consommateur.** Le workflow imprime le digest publié ; un tag
+   reste mutable, un digest non.

@@ -161,8 +161,7 @@ impl Metabase {
             }
             (other, _) => {
                 return Err(ApiError::transport(format!(
-                    "méthode {} non gérée (ou corps incohérent)",
-                    other
+                    "méthode {other} non gérée (ou corps incohérent)"
                 )));
             }
         };
@@ -178,7 +177,7 @@ impl Metabase {
 
         let status = response.status().as_u16();
         let raw = response.body_mut().read_to_string().map_err(|e| {
-            ApiError::transport(format!("{} {} -> corps illisible : {}", method, path, e))
+            ApiError::transport(format!("{method} {path} -> corps illisible : {e}"))
         })?;
 
         if !(200..300).contains(&status) {
@@ -186,7 +185,7 @@ impl Metabase {
             detail.truncate(ERROR_BODY_MAX);
             return Err(ApiError {
                 status: Some(status),
-                message: format!("{} {} -> HTTP {} : {}", method, path, status, detail),
+                message: format!("{method} {path} -> HTTP {status} : {detail}"),
             });
         }
 
@@ -194,10 +193,7 @@ impl Metabase {
             return Ok(Value::Null);
         }
         serde_json::from_str(&raw).map_err(|e| {
-            ApiError::transport(format!(
-                "{} {} -> réponse JSON invalide : {}",
-                method, path, e
-            ))
+            ApiError::transport(format!("{method} {path} -> réponse JSON invalide : {e}"))
         })
     }
 

@@ -57,10 +57,7 @@ impl DataSource {
                 match raw.parse::<i64>() {
                     Ok(port) => Value::from(port),
                     Err(_) => {
-                        return Err(format!(
-                            "port {:?} non numérique (fichier {})",
-                            raw, filename
-                        ))
+                        return Err(format!("port {raw:?} non numérique (fichier {filename})"))
                     }
                 }
             } else {
@@ -163,7 +160,7 @@ pub fn fingerprint(engine: &str, details: &Map<String, Value>) -> String {
     let payload = serde_json::json!({ "engine": engine, "details": details });
     let canonical = serde_json::to_string(&payload).unwrap_or_default();
     let digest = Sha256::digest(canonical.as_bytes());
-    format!("{:x}", digest)
+    format!("{digest:x}")
 }
 
 /// Champs de `details` qui ont dérivé côté Metabase, parmi ceux que l'API renvoie.

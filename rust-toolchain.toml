@@ -1,0 +1,16 @@
+# La version de Rust du dépôt — et elle est AUSSI le plancher déclaré dans `Cargo.toml`.
+#
+# Un seul numéro pour les trois usages (poste de travail, CI, image publiée) : le compilateur qui
+# construit le binaire publié est celui que la CI a éprouvé. Un canal flottant, lui, change sous
+# les pieds — un jour sans poussée peut suffire à faire rougir clippy.
+#
+# Ce que l'épinglage NE fait PAS : détecter qu'une dépendance a monté son plancher. Avec le
+# resolver v2 (édition 2021), le `rust-version` d'une dépendance est indicatif — mesuré, un canal
+# 1.85 compile sans broncher un arbre où `icu_*` et `time` déclarent 1.88. C'est `task msrv` qui
+# s'en charge, en comparant le plancher déclaré à l'arbre verrouillé.
+#
+# Monter ce numéro se fait aux trois endroits à la fois — `task msrv` le vérifie aussi.
+[toolchain]
+channel = "1.88.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

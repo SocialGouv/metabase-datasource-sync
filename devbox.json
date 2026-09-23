@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.18.3/.schema/devbox.schema.json",
+  "packages": [
+    "rustup@1.29.0",
+    "go-task@3.53.1",
+    "python@3.13.15"
+  ],
+  "shell": {
+    "init_hook": [
+      "echo 'metabase-datasource-sync : task --list pour les commandes. La version de Rust vient de rust-toolchain.toml (rustup la pose), pas de devbox.'"
+    ],
+    "scripts": {
+      "check": ["task check"],
+      "test": ["task test"]
+    }
+  }
+}

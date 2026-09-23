@@ -7,7 +7,9 @@
 # `rustls` + `webpki-roots` compilent les certificats racines DANS le binaire : pas besoin d'y
 # copier un bundle CA, contrairement à ce qu'imposerait la bibliothèque TLS du système.
 
-FROM rust:1-alpine AS builder
+# Version épinglée, pas `rust:1-alpine` : un tag flottant fait compiler l'image publiée par un
+# compilateur que la CI n'a jamais éprouvé. Elle suit `rust-toolchain.toml` — `task msrv` le vérifie.
+FROM rust:1.88-alpine AS builder
 # musl-dev fournit le linker ; la cible par défaut de cette image est déjà x86_64-unknown-linux-musl,
 # donc le binaire produit est statique.
 RUN apk add --no-cache musl-dev
