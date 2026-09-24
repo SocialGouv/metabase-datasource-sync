@@ -46,6 +46,14 @@ plancher déclaré couvre l'arbre verrouillé (`cargo metadata`). Les cinq mutan
 été vus rouges — un par déclaration, le tag flottant `rust:1`, et les trois abaissées ensemble
 (seule la seconde moitié peut mordre sur celui-là).
 
+**Renovate fait bouger les trois d'un seul tenant, sur UNE datasource.** Grouper ne suffit pas, et
+c'est un dry run qui l'a montré : le manager natif `rust-toolchain` lit le canal par la datasource
+`rust-version`, qui **retarde** — le 23/09/2026 elle proposait 1.97.1 quand Rust 1.98.1 était
+publié et que `docker` proposait 1.98. Groupés mais sur deux datasources, les trois tombaient sur
+une seule branche avec deux versions, et `task msrv` rougissait par construction. Le canal et
+`rust-version` passent donc par le manager maison de `.github/renovate.json5`, sur `docker` comme
+le `FROM` ; le manager natif est éteint. Ne pas le rallumer « pour simplifier ».
+
 **Un tag ne publie que la version qu'il annonce.** `docker-release.yaml` refuse de publier quand
 `vX.Y.Z` ne correspond pas au `version` de `Cargo.toml` — un `--version` qui ment ne se découvre
 qu'en diagnostic, au pire moment.
@@ -64,12 +72,16 @@ refus sont la fonctionnalité ; ne pas les « assouplir » pour faire passer un 
 Le dépôt entre dans la boucle d'auto-maintenance (épique iterion **#1585**, ticket **#1597**).
 Dans l'ordre, et l'ordre est contraint :
 
-1. **Pas de Renovate.** Le dépôt doit être **ajouté** à l'installation de l'App
-   `socialgouv-renovate` (`repository_selection: selected`) et ses deux secrets créés. La conf
-   voudra le manager `cargo` natif plus un manager maison pour l'image Metabase épinglée dans
-   `ci.yml` et pour l'image de build du `Dockerfile`.
-2. **Les actions ne sont pas épinglées par SHA.** À faire avec Renovate, qui sait les maintenir —
-   les épingler à la main sans lui donnerait des versions figées pour toujours.
+1. **Renovate est configuré, mais ne peut pas encore tourner.** `.github/renovate.json5` et le
+   workflow sont en place ; il manque, hors du dépôt : l'**ajout** du dépôt à l'installation de
+   l'App `socialgouv-renovate` (`repository_selection: selected`) et ses **deux secrets**
+   (`RENOVATE_APP_ID`, `RENOVATE_APP_PRIVATE_KEY`). D'ici là le run hebdomadaire échoue à l'étape
+   du jeton — bruyamment, c'est voulu. Les images de `services:` (Metabase, PostgreSQL) sont lues
+   par le manager `github-actions` natif : aucun manager maison n'est nécessaire pour elles.
+2. **Les actions ne sont pas épinglées par SHA.** `helpers:pinGitHubActionDigests` est absent
+   exprès : il réécrit `.github/workflows/**`, que l'App qui livre l'alignement ne peut pas encore
+   toucher (iterion **#1595**, décision en attente). L'activer avant ferait naître des PR que
+   personne ne peut aligner.
 3. **Pas d'intégration iterion.** Dans cet ordre : un premier verdict vert, **puis**
    `revi/review` requis, **puis** l'observer bloquer une révision neuve, **puis** armer
    l'automerge — jamais l'inverse. Un gate mal aligné avec un automerge armé est un trou, pas une
