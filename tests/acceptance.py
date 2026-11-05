@@ -445,6 +445,33 @@ def scenario_real_throttling():
     shutil.rmtree(work, ignore_errors=True)
 
 
+def scenario_throttling_mid_pass():
+    """La session expire pendant une ÉCRITURE et la reconnexion est refusée pour throttling : le
+    refus concerne le compte, la passe doit s'arrêter. Passer à la source suivante relancerait une
+    connexion par source, chacune comptant pour le verrou de Metabase."""
+    print("--- throttling en pleine passe : la passe s'arrête ---")
+    stub, port = fresh_stub()
+    work = tempfile.mkdtemp(prefix="mds-throttle-pass-")
+    env = {"DS_COUNT": "3"}
+    for i in range(3):
+        directory = os.path.join(work, "ds{}".format(i))
+        write_secret(directory, pg_secret("v-user-{}".format(i), PG_PASSWORD_1,
+                                          dbname="base{}".format(i)))
+        stub.add_database("S{}".format(i), "postgres",
+                          {"host": "cluster-rw.svc.cluster.local", "port": 5432,
+                           "dbname": "base{}".format(i), "user": "ancien"})
+        env.update({"DS{}_NAME".format(i): "S{}".format(i), "DS{}_ENGINE".format(i): "postgres",
+                    "DS{}_DIR".format(i): directory, "DS{}_KEYS".format(i): PG_KEYS,
+                    "DS{}_EXTRA".format(i): "{}"})
+    stub.STATE["expire_on_put"] = True
+    with Runner(stub, port, work, env) as run:
+        time.sleep(4)
+    check("une seule reconnexion refusée, pas une par source", stub.STATE["logins"] == 2,
+          str(stub.STATE["logins"]))
+    check("le refus est journalisé", "Too many attempts" in run.output, run.output[-300:])
+    shutil.rmtree(work, ignore_errors=True)
+
+
 if __name__ == "__main__":
     nominal_output = scenario_nominal()
     scenario_preserved_fields()
@@ -458,6 +485,7 @@ if __name__ == "__main__":
     scenario_pinned_id_missing()
     scenario_invalid_id()
     scenario_real_throttling()
+    scenario_throttling_mid_pass()
     print("--- journal du réconciliateur (nominal) ---")
     print(nominal_output.strip())
     print("--- {} échec(s) ---".format(len(failures)))

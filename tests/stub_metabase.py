@@ -18,7 +18,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 STATE = {"databases": [], "next_id": 1, "writes": [], "logins": 0, "throttled": False, "lists": 0,
-         "throttle_real": False}
+         "throttle_real": False, "expire_on_put": False}
 ADMIN = {"email": "ops@exemple.fr", "password": "mot-de-passe-admin-jamais-imprime"}
 TOKEN = "session-de-test"
 
@@ -95,6 +95,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         if self.path.startswith("/api/database/"):
+            if STATE["expire_on_put"]:
+                # La session expire en pleine passe, et le compte est déjà sous throttling.
+                STATE["expire_on_put"] = False
+                STATE["throttle_real"] = True
+                return self._send(401, {"message": "unauthenticated"})
             if not self._authed():
                 return self._send(401, {"message": "unauthenticated"})
             body = self._body()

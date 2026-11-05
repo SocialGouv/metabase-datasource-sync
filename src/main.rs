@@ -269,9 +269,10 @@ fn run(config: Config) {
                 .and_then(|listing| as_databases(&listing))
             {
                 Ok(databases) => {
+                    let mut refused = None;
                     for (idx, details) in &wanted {
                         let source = &config.sources[*idx];
-                        if let Err(err) = reconcile_one(
+                        match reconcile_one(
                             &mut session,
                             &databases,
                             source,
@@ -280,23 +281,32 @@ fn run(config: Config) {
                             &mut pushed,
                             *idx,
                         ) {
+                            Ok(()) => {}
+                            // Un refus d'authentification concerne le COMPTE, pas la source :
+                            // passer à la suivante relancerait une connexion par source, et
+                            // chacune compte pour le throttling de Metabase.
+                            Err(SourceError::Api(err)) if is_auth_failure(&err) => {
+                                log_err(&format!("[{}] ECHEC : {}", source.name, err));
+                                refused = Some(err);
+                                break;
+                            }
                             // Une source en échec n'arrête pas les autres.
-                            log_err(&format!("[{}] ECHEC : {}", source.name, err));
+                            Err(err) => log_err(&format!("[{}] ECHEC : {}", source.name, err)),
                         }
                     }
-                    last_full = Some(Instant::now());
+                    match refused {
+                        Some(err) => {
+                            global_failure = true;
+                            delay = auth_backoff(&mut session, config.poll, &err);
+                        }
+                        None => last_full = Some(Instant::now()),
+                    }
                 }
                 Err(err) => {
                     global_failure = true;
                     log_err(&format!("ECHEC : {err}"));
-                    if matches!(err.status, Some(401) | Some(403) | Some(429))
-                        || err.imposed_wait.is_some()
-                    {
-                        delay = session.backoff(config.poll, err.imposed_wait);
-                        log_err(&format!(
-                            "authentification refusée — prochaine tentative dans {}s",
-                            delay.as_secs()
-                        ));
+                    if is_auth_failure(&err) {
+                        delay = auth_backoff(&mut session, config.poll, &err);
                     }
                 }
             }
@@ -316,15 +326,37 @@ fn run(config: Config) {
 /// tableau nu. Toute autre forme est une erreur : la lire comme « aucune source » ferait créer
 /// en double chaque source déjà présente.
 fn as_databases(listing: &Value) -> Result<Vec<Value>, metabase::ApiError> {
-    match listing {
-        Value::Object(map) => match map.get("data") {
-            Some(Value::Array(items)) => Ok(items.clone()),
-            _ => Err(unexpected_listing("objet sans tableau `data`")),
-        },
-        Value::Array(items) => Ok(items.clone()),
-        Value::Null => Err(unexpected_listing("corps vide")),
-        _ => Err(unexpected_listing("ni objet ni tableau")),
+    let items = match listing {
+        Value::Object(map) => {
+            let Some(Value::Array(items)) = map.get("data") else {
+                return Err(unexpected_listing("objet sans tableau `data`"));
+            };
+            // `total` est le compte de la liste complète : un écart signale une liste tronquée,
+            // qu'il serait faux de lire comme exhaustive.
+            if let Some(total) = map.get("total") {
+                if total.as_u64() != Some(items.len() as u64) {
+                    return Err(unexpected_listing(
+                        "`total` ne correspond pas au nombre de sources reçues",
+                    ));
+                }
+            }
+            items
+        }
+        Value::Array(items) => items,
+        Value::Null => return Err(unexpected_listing("corps vide")),
+        _ => return Err(unexpected_listing("ni objet ni tableau")),
+    };
+    // Un élément sans identifiant entier ne peut être ni comparé ni réécrit : l'ignorer ferait
+    // conclure à l'absence d'une source peut-être présente.
+    if let Some(bad) = items
+        .iter()
+        .position(|db| db.get("id").and_then(Value::as_i64).is_none())
+    {
+        return Err(unexpected_listing(&format!(
+            "élément {bad} sans identifiant entier"
+        )));
     }
+    Ok(items.clone())
 }
 
 fn unexpected_listing(what: &str) -> metabase::ApiError {
@@ -338,6 +370,47 @@ fn unexpected_listing(what: &str) -> metabase::ApiError {
     }
 }
 
+/// Échec d'une source : LOCAL (configuration, ambiguïté, source épinglée absente — les autres
+/// sources continuent) ou renvoyé par l'API, dont l'authentification, qui concerne le compte.
+enum SourceError {
+    Local(String),
+    Api(metabase::ApiError),
+}
+
+impl From<String> for SourceError {
+    fn from(message: String) -> Self {
+        SourceError::Local(message)
+    }
+}
+
+impl From<metabase::ApiError> for SourceError {
+    fn from(err: metabase::ApiError) -> Self {
+        SourceError::Api(err)
+    }
+}
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceError::Local(message) => write!(f, "{message}"),
+            SourceError::Api(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+fn is_auth_failure(err: &metabase::ApiError) -> bool {
+    matches!(err.status, Some(401) | Some(403) | Some(429)) || err.imposed_wait.is_some()
+}
+
+fn auth_backoff(session: &mut Metabase, poll: Duration, err: &metabase::ApiError) -> Duration {
+    let delay = session.backoff(poll, err.imposed_wait);
+    log_err(&format!(
+        "authentification refusée — prochaine tentative dans {}s",
+        delay.as_secs()
+    ));
+    delay
+}
+
 fn reconcile_one(
     session: &mut Metabase,
     databases: &[Value],
@@ -346,7 +419,7 @@ fn reconcile_one(
     create_if_missing: bool,
     pushed: &mut HashMap<usize, String>,
     idx: usize,
-) -> Result<(), String> {
+) -> Result<(), SourceError> {
     let fingerprint = datasource::fingerprint(&source.engine, want);
     let existing = source.find_existing(databases, want)?;
     let user = datasource::comparable(want.get("user"));
@@ -356,12 +429,11 @@ fn reconcile_one(
             return Err(format!(
                 "la source '{}' n'existe pas et la création automatique est désactivée",
                 source.name
-            ));
+            )
+            .into());
         }
         let payload = json!({"name": source.name, "engine": source.engine, "details": want});
-        session
-            .call("/api/database", "POST", Some(&payload))
-            .map_err(|e| e.to_string())?;
+        session.call("/api/database", "POST", Some(&payload))?;
         pushed.insert(idx, fingerprint);
         log(&format!("[{}] source créée (user {})", source.name, user));
         return Ok(());
@@ -395,13 +467,11 @@ fn reconcile_one(
         .get("id")
         .and_then(Value::as_i64)
         .ok_or_else(|| format!("la source '{display_name}' n'a pas d'identifiant exploitable"))?;
-    session
-        .call(
-            &format!("/api/database/{id}"),
-            "PUT",
-            Some(&Value::Object(payload)),
-        )
-        .map_err(|e| e.to_string())?;
+    session.call(
+        &format!("/api/database/{id}"),
+        "PUT",
+        Some(&Value::Object(payload)),
+    )?;
     pushed.insert(idx, fingerprint);
 
     let reason = if remote_drift.is_empty() {
@@ -424,6 +494,16 @@ mod tests {
         assert!(as_databases(&Value::Null).is_err());
         assert!(as_databases(&json!({"message": "maintenance"})).is_err());
         assert!(as_databases(&json!({"data": null})).is_err());
+    }
+
+    #[test]
+    fn une_liste_aux_elements_invalides_ou_tronquee_est_une_erreur() {
+        let db = json!({"id": 1, "name": "A"});
+        assert!(as_databases(&json!({"data": [null], "total": 1})).is_err());
+        assert!(as_databases(&json!({"data": [{"error": "maintenance"}], "total": 1})).is_err());
+        assert!(as_databases(&json!({"data": [[db.clone()]], "total": 1})).is_err());
+        assert!(as_databases(&json!({"data": [], "total": 1})).is_err());
+        assert!(as_databases(&json!({"data": [db], "total": 2})).is_err());
     }
 
     #[test]

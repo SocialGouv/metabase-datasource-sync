@@ -26,6 +26,10 @@ const THROTTLE_WINDOW: Duration = Duration::from_secs(3600);
 /// Marge au-delà de la fenêtre : une tentative arrivée une fraction trop tôt relancerait le verrou.
 const THROTTLE_MARGIN: Duration = Duration::from_secs(60);
 
+/// Borne d'un délai affiché : le corps vient d'un tiers, un nombre aberrant ne doit ni faire
+/// paniquer l'addition ni suspendre le programme indéfiniment.
+const ANNOUNCED_MAX: Duration = Duration::from_secs(24 * 3600);
+
 #[derive(Debug)]
 pub struct ApiError {
     pub status: Option<u16>,
@@ -59,7 +63,9 @@ fn imposed_wait(body: &str) -> Option<Duration> {
     if !body.contains("Too many attempts") {
         return None;
     }
-    let announced = announced_seconds(body).unwrap_or(Duration::ZERO);
+    let announced = announced_seconds(body)
+        .unwrap_or(Duration::ZERO)
+        .min(ANNOUNCED_MAX);
     Some(announced.max(THROTTLE_WINDOW) + THROTTLE_MARGIN)
 }
 
@@ -284,6 +290,12 @@ mod tests {
             imposed_wait(body),
             Some(Duration::from_secs(5000) + THROTTLE_MARGIN)
         );
+    }
+
+    #[test]
+    fn un_delai_affiche_aberrant_est_borne() {
+        let body = r#"{"errors":{"username":"Too many attempts! You must wait 18446744073709551615 seconds before trying again."}}"#;
+        assert_eq!(imposed_wait(body), Some(ANNOUNCED_MAX + THROTTLE_MARGIN));
     }
 
     #[test]
