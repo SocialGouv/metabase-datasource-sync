@@ -420,6 +420,12 @@ def scenario_invalid_id():
     result = subprocess.run(IMPLEMENTATION, env=env, capture_output=True, text=True, timeout=10)
     check("code de sortie non nul", result.returncode != 0)
     check("le motif est explicite", "DS0_ID" in result.stderr, result.stderr[:200])
+    # Une valeur illisible n'est pas une absence : la confondre ferait créer la source épinglée.
+    envb = {k.encode(): v.encode() for k, v in env.items()}
+    envb[b"DS0_ID"] = b"\xff"
+    result = subprocess.run(IMPLEMENTATION, env=envb, capture_output=True, text=True, timeout=10)
+    check("DS0_ID non UTF-8 refusé au démarrage", result.returncode != 0 and "DS0_ID" in result.stderr,
+          result.stderr[:200])
 
 
 def scenario_real_throttling():

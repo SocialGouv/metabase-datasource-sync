@@ -60,10 +60,19 @@ impl ApiError {
 /// verrou tient toujours. Metabase ne pose pas d'en-tête `Retry-After` : le texte est la seule
 /// trace. Le délai affiché est un plancher, la fenêtre complète en est un autre.
 fn imposed_wait(body: &str) -> Option<Duration> {
-    if !body.contains("Too many attempts") {
+    // Le message est lu DÉCODÉ quand le corps est du JSON : un sérialiseur peut échapper ses
+    // caractères (`\u0054oo many…`) sans en changer le sens. Le texte brut reste le repli des
+    // corps qui ne sont pas du JSON.
+    let decoded = serde_json::from_str::<Value>(body).ok().and_then(|json| {
+        json.pointer("/errors/username")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    });
+    let message = decoded.as_deref().unwrap_or(body);
+    if !message.contains("Too many attempts") {
         return None;
     }
-    let announced = announced_seconds(body)
+    let announced = announced_seconds(message)
         .unwrap_or(Duration::ZERO)
         .min(ANNOUNCED_MAX);
     Some(announced.max(THROTTLE_WINDOW) + THROTTLE_MARGIN)
@@ -286,6 +295,15 @@ mod tests {
     #[test]
     fn un_delai_affiche_plus_long_que_la_fenetre_est_respecte() {
         let body = r#"{"errors":{"username":"Too many attempts! You must wait 5000 seconds before trying again."}}"#;
+        assert_eq!(
+            imposed_wait(body),
+            Some(Duration::from_secs(5000) + THROTTLE_MARGIN)
+        );
+    }
+
+    #[test]
+    fn un_message_json_echappe_est_reconnu() {
+        let body = r#"{"errors":{"username":"\u0054oo many attempts! You must wait 5000 seconds before trying again."}}"#;
         assert_eq!(
             imposed_wait(body),
             Some(Duration::from_secs(5000) + THROTTLE_MARGIN)

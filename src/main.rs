@@ -168,7 +168,15 @@ fn secs(key: &str, default: f64) -> Result<Duration, String> {
 /// identifiant Metabase valide.
 fn parse_id(idx: usize) -> Result<Option<i64>, String> {
     let key = format!("DS{idx}_ID");
-    let raw = env_or(&key, "");
+    // Seule l'ABSENCE vaut « pas d'épinglage » : une valeur illisible (non UTF-8) est une erreur,
+    // pas une variable manquante — la confondre ferait créer la source qu'elle devait épingler.
+    let raw = match std::env::var(&key) {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!("{key} n'est pas une chaîne UTF-8 lisible"))
+        }
+    };
     if raw.trim().is_empty() {
         return Ok(None);
     }
