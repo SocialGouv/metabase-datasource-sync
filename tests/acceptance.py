@@ -355,6 +355,96 @@ def scenario_liveness():
     shutil.rmtree(work, ignore_errors=True)
 
 
+def scenario_pinned_id():
+    """Instance MIGRÉE : la source à adopter porte le nom de l'ancienne instance et vise l'ancien
+    hôte, donc ni le nom ni l'adressage ne la retrouvent. Sans épinglage, le programme créerait un
+    doublon vide et laisserait les questions sur une source cassée (vu en production)."""
+    print("--- id épinglé : adoption d'une source migrée ---")
+    stub, port = fresh_stub()
+    work = tempfile.mkdtemp(prefix="mds-pinned-")
+    directory = os.path.join(work, "ds0")
+    write_secret(directory, pg_secret("v-reader-aaaa", PG_PASSWORD_1))
+    migrated = stub.add_database("SIRENA (anonymisé)", "postgres",
+                                 {"host": "ancien-hote-v1", "port": 5432, "dbname": "sirena",
+                                  "user": "avnadmin", "password": "ancien"},
+                                 is_on_demand=True, cache_ttl=24)
+    decoy = stub.add_database("cible", "postgres",
+                              {"host": "autre", "port": 5432, "dbname": "autre", "user": "u"})
+
+    with Runner(stub, port, work, {
+        "DS_COUNT": "1", "DS0_NAME": "cible", "DS0_ID": str(migrated["id"]),
+        "DS0_ENGINE": "postgres", "DS0_DIR": directory, "DS0_KEYS": PG_KEYS, "DS0_EXTRA": "{}",
+    }):
+        time.sleep(3)
+    check("aucune création malgré nom et adresse inconnus",
+          not any(w[0] == "POST" for w in stub.STATE["writes"]), str(stub.STATE["writes"]))
+    check("la source épinglée est réécrite",
+          migrated["details"].get("host") == "cluster-rw.svc.cluster.local"
+          and migrated["details"].get("user") == "v-reader-aaaa", str(migrated["details"]))
+    check("son nom n'est pas touché", migrated["name"] == "SIRENA (anonymisé)", migrated["name"])
+    check("ses réglages sont conservés",
+          migrated.get("is_on_demand") is True and migrated.get("cache_ttl") == 24,
+          str({k: migrated.get(k) for k in ("is_on_demand", "cache_ttl")}))
+    check("l'homonyme n'est pas adoptée", decoy["details"].get("host") == "autre",
+          str(decoy["details"]))
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def scenario_pinned_id_missing():
+    print("--- id épinglé absent : erreur, jamais de création ni de repli sur le nom ---")
+    stub, port = fresh_stub()
+    work = tempfile.mkdtemp(prefix="mds-pinned-missing-")
+    directory = os.path.join(work, "ds0")
+    write_secret(directory, pg_secret("v-reader-aaaa", PG_PASSWORD_1))
+    homonym = stub.add_database("cible", "postgres",
+                                {"host": "cluster-rw.svc.cluster.local", "port": 5432,
+                                 "dbname": "appdb", "user": "ancien"})
+
+    with Runner(stub, port, work, {
+        "DS_COUNT": "1", "DS0_NAME": "cible", "DS0_ID": "99",
+        "DS0_ENGINE": "postgres", "DS0_DIR": directory, "DS0_KEYS": PG_KEYS, "DS0_EXTRA": "{}",
+    }) as run:
+        time.sleep(3)
+    check("rien écrit dans Metabase", stub.STATE["writes"] == [], str(stub.STATE["writes"]))
+    check("l'homonyme n'est pas adoptée", homonym["details"].get("user") == "ancien")
+    check("l'absence est journalisée", "introuvable" in run.output, run.output[-300:])
+    shutil.rmtree(work, ignore_errors=True)
+
+
+def scenario_invalid_id():
+    print("--- id épinglé invalide : refus de démarrer ---")
+    env = dict(os.environ)
+    env.update({"MB_URL": "http://127.0.0.1:1", "MB_ADMIN_EMAIL": "a@b",
+                "MB_ADMIN_PASSWORD_FILE": "/nowhere", "DS_COUNT": "1", "DS0_NAME": "x",
+                "DS0_DIR": "/nowhere", "DS0_ID": "deux"})
+    result = subprocess.run(IMPLEMENTATION, env=env, capture_output=True, text=True, timeout=10)
+    check("code de sortie non nul", result.returncode != 0)
+    check("le motif est explicite", "DS0_ID" in result.stderr, result.stderr[:200])
+
+
+def scenario_real_throttling():
+    """Le throttling RÉEL de Metabase : chaque tentative faite pendant le verrou compte et le
+    prolonge, et le délai affiché n'en est pas l'échéance. Un client qui retente sur sa seule
+    temporisation garde le compte admin verrouillé indéfiniment (vu en production)."""
+    print("--- throttling réel : pas de nouvelle tentative pendant le verrou ---")
+    stub, port = fresh_stub()
+    stub.STATE["throttle_real"] = True
+    work = tempfile.mkdtemp(prefix="mds-throttle-")
+    directory = os.path.join(work, "ds0")
+    write_secret(directory, pg_secret("v-user", PG_PASSWORD_1))
+
+    with Runner(stub, port, work, {
+        "DS_COUNT": "1", "DS0_NAME": "X", "DS0_ENGINE": "postgres",
+        "DS0_DIR": directory, "DS0_KEYS": PG_KEYS, "DS0_EXTRA": "{}",
+    }) as run:
+        time.sleep(6)
+        check("process vivant", run.proc.poll() is None)
+    check("une seule tentative de connexion pendant le verrou", stub.STATE["logins"] == 1,
+          str(stub.STATE["logins"]))
+    check("le throttling est journalisé", "Too many attempts" in run.output, run.output[-300:])
+    shutil.rmtree(work, ignore_errors=True)
+
+
 if __name__ == "__main__":
     nominal_output = scenario_nominal()
     scenario_preserved_fields()
@@ -364,6 +454,10 @@ if __name__ == "__main__":
     scenario_periodic()
     scenario_failure_path()
     scenario_liveness()
+    scenario_pinned_id()
+    scenario_pinned_id_missing()
+    scenario_invalid_id()
+    scenario_real_throttling()
     print("--- journal du réconciliateur (nominal) ---")
     print(nominal_output.strip())
     print("--- {} échec(s) ---".format(len(failures)))

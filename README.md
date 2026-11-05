@@ -43,6 +43,11 @@ changement local, plutôt que de dépendre d'un front qui, manqué, laisserait u
 silencieuse. Un échec transitoire est journalisé et retenté ; un échec **durable** cesse de
 rafraîchir un fichier de heartbeat, ce qu'une sonde de liveness transforme en redémarrage visible.
 
+Le throttling de `/api/session` est respecté à la lettre : Metabase refuse toute connexion tant que
+le compte cumule 10 échecs dans l'heure, et **chaque refus compte**. Après un refus pour throttling,
+le programme ne retente donc pas avant une heure — retenter plus tôt garderait le compte admin
+verrouillé indéfiniment, pour lui comme pour les humains qui le partagent.
+
 Aucun mot de passe n'est journalisé, y compris dans les corps d'erreur renvoyés par Metabase.
 
 ## Configuration
@@ -61,6 +66,7 @@ Tout passe par l'environnement.
 | `CREATE_IF_MISSING` | `true` | créer la source si elle n'existe pas (voir l'avertissement) |
 | `DS_COUNT` | `0` | nombre de sources |
 | `DS<i>_NAME` | — | nom affiché dans Metabase ; sert de clé d'idempotence |
+| `DS<i>_ID` | — | identifiant Metabase de la source à adopter ; prime sur le nom et l'adressage, interdit la création (voir « Instance migrée ») |
 | `DS<i>_ENGINE` | `postgres` | moteur Metabase |
 | `DS<i>_DIR` | — | répertoire où le Secret est monté |
 | `DS<i>_KEYS` | `{}` | JSON : champ de `details` → nom du fichier dans `DS<i>_DIR` |
@@ -87,9 +93,23 @@ ces variables, monte les Secrets en volume et câble la sonde de liveness sur le
 > cloisonne pas les données. Régler les permissions côté Metabase, et vérifier avec un compte
 > non-admin. Pour garder ce provisioning manuel : `CREATE_IF_MISSING=false`.
 
+## Instance migrée : épingler l'identifiant
+
+Une instance Metabase restaurée depuis une autre (dump de l'ancienne plateforme) porte des sources
+au nom de l'ancienne instance, pointées sur l'**ancien** hôte. Ni le nom de la configuration ni
+l'adressage ne les retrouvent — l'hôte change par définition — et, sans autre consigne, le
+programme crée des sources neuves et vides à côté, tandis que questions et tableaux de bord restent
+sur les anciennes, cassées.
+
+`DS<i>_ID` nomme la source à adopter par son identifiant (visible dans l'URL de l'administration
+Metabase : `/admin/databases/<id>`). Posé, il prime sur tout le reste : la source est réécrite sur
+les nouveaux identifiants, sans renommage, et son absence est une **erreur**, jamais une création.
+
 ## Ce qu'il refuse de faire
 
 - **Écrire dans une base réservée** de Metabase (`is_sample`, `is_audit`, `is_attached_dwh`).
+- **Créer une source épinglée.** Une source dont `DS<i>_ID` est posé et qui n'existe pas est une
+  erreur, pas un manque à combler.
 - **Choisir entre deux candidates.** Une source est retrouvée par son nom, à défaut par
   `(moteur, host, port, dbname)`. Si plusieurs correspondent, il refuse bruyamment plutôt que de
   réécrire la connexion d'une source qui ne lui appartient pas.

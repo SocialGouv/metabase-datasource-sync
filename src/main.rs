@@ -121,6 +121,7 @@ impl Config {
         for idx in 0..count {
             sources.push(DataSource {
                 name: required(&format!("DS{idx}_NAME"))?,
+                id: parse_id(idx)?,
                 engine: env_or(&format!("DS{idx}_ENGINE"), "postgres"),
                 dir: PathBuf::from(required(&format!("DS{idx}_DIR"))?),
                 keys: parse_map(&env_or(&format!("DS{idx}_KEYS"), "{}"), idx, "KEYS")?,
@@ -160,6 +161,23 @@ fn secs(key: &str, default: f64) -> Result<Duration, String> {
         ));
     }
     Ok(Duration::from_secs_f64(value))
+}
+
+/// `DS<i>_ID` absent ou vide : pas d'épinglage. Le vide est accepté parce qu'un chart qui rend
+/// `value: ""` pour une valeur non posée est courant ; toute autre valeur doit être un
+/// identifiant Metabase valide.
+fn parse_id(idx: usize) -> Result<Option<i64>, String> {
+    let key = format!("DS{idx}_ID");
+    let raw = env_or(&key, "");
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    match raw.trim().parse::<i64>() {
+        Ok(id) if id > 0 => Ok(Some(id)),
+        _ => Err(format!(
+            "{key} = {raw:?} n'est pas un identifiant de source Metabase (entier strictement positif)"
+        )),
+    }
 }
 
 fn parse_map(raw: &str, idx: usize, what: &str) -> Result<BTreeMap<String, String>, String> {
@@ -246,9 +264,11 @@ fn run(config: Config) {
 
         let mut global_failure = false;
         if !wanted.is_empty() && (due || drifted) {
-            match session.call("/api/database", "GET", None) {
-                Ok(listing) => {
-                    let databases = as_databases(&listing);
+            match session
+                .call("/api/database", "GET", None)
+                .and_then(|listing| as_databases(&listing))
+            {
+                Ok(databases) => {
                     for (idx, details) in &wanted {
                         let source = &config.sources[*idx];
                         if let Err(err) = reconcile_one(
@@ -269,8 +289,10 @@ fn run(config: Config) {
                 Err(err) => {
                     global_failure = true;
                     log_err(&format!("ECHEC : {err}"));
-                    if matches!(err.status, Some(401) | Some(403) | Some(429)) {
-                        delay = session.backoff(config.poll);
+                    if matches!(err.status, Some(401) | Some(403) | Some(429))
+                        || err.imposed_wait.is_some()
+                    {
+                        delay = session.backoff(config.poll, err.imposed_wait);
                         log_err(&format!(
                             "authentification refusée — prochaine tentative dans {}s",
                             delay.as_secs()
@@ -291,16 +313,28 @@ fn run(config: Config) {
 }
 
 /// L'API renvoie `{"data": [...]}` depuis la v0.47 ; les versions antérieures renvoyaient un
-/// tableau nu.
-fn as_databases(listing: &Value) -> Vec<Value> {
+/// tableau nu. Toute autre forme est une erreur : la lire comme « aucune source » ferait créer
+/// en double chaque source déjà présente.
+fn as_databases(listing: &Value) -> Result<Vec<Value>, metabase::ApiError> {
     match listing {
-        Value::Object(map) => map
-            .get("data")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-        Value::Array(items) => items.clone(),
-        _ => Vec::new(),
+        Value::Object(map) => match map.get("data") {
+            Some(Value::Array(items)) => Ok(items.clone()),
+            _ => Err(unexpected_listing("objet sans tableau `data`")),
+        },
+        Value::Array(items) => Ok(items.clone()),
+        Value::Null => Err(unexpected_listing("corps vide")),
+        _ => Err(unexpected_listing("ni objet ni tableau")),
+    }
+}
+
+fn unexpected_listing(what: &str) -> metabase::ApiError {
+    metabase::ApiError {
+        status: None,
+        message: format!(
+            "GET /api/database -> réponse inattendue ({what}) — refus d'en conclure qu'aucune \
+             source n'existe"
+        ),
+        imposed_wait: None,
     }
 }
 
@@ -379,4 +413,28 @@ fn reconcile_one(
         "[{display_name}] réécrite ({reason}) -> user {user}"
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn une_liste_de_forme_inattendue_est_une_erreur() {
+        assert!(as_databases(&Value::Null).is_err());
+        assert!(as_databases(&json!({"message": "maintenance"})).is_err());
+        assert!(as_databases(&json!({"data": null})).is_err());
+    }
+
+    #[test]
+    fn les_deux_formes_connues_de_la_liste_sont_lues() {
+        let db = json!({"id": 1, "name": "A"});
+        assert_eq!(
+            as_databases(&json!({"data": [db.clone()], "total": 1}))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(as_databases(&json!([db])).unwrap().len(), 1);
+    }
 }

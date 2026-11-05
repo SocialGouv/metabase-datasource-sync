@@ -136,6 +136,82 @@ def query_rows(token, database_id):
     return res["data"]["rows"]
 
 
+def run_sync(env_extra, seconds, work):
+    """Lance le binaire `seconds` secondes avec l'environnement commun, rend son journal."""
+    env = dict(os.environ)
+    env.update({
+        "MB_URL": MB,
+        "MB_ADMIN_EMAIL": ADMIN_EMAIL,
+        "MB_ADMIN_PASSWORD_FILE": os.path.join(work, "admin", "password"),
+        "POLL_SECONDS": "2",
+        "RECONCILE_SECONDS": "3600",
+        "HEARTBEAT_FILE": os.path.join(work, "alive"),
+    })
+    env.update(env_extra)
+    proc = subprocess.Popen(BIN.split(), env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    try:
+        time.sleep(seconds)
+    finally:
+        proc.terminate()
+    return proc.stdout.read()
+
+
+def scenario_pinned(token, work):
+    """Instance MIGRÉE : une source porte le nom de l'ancienne instance et une autre adresse (ici
+    une autre base du même serveur). Ni le nom ni l'adressage ne la retrouvent ; seul `DS0_ID`
+    peut la désigner. Elle doit être réécrite — pas doublée d'une source neuve et vide."""
+    print("--- instance migree : adoption par identifiant epingle ---")
+    migrated = call("/api/database", "POST", {
+        "name": "SIRENA (anonymise, ancienne instance)", "engine": "postgres",
+        "details": {"host": PG_HOST_FOR_METABASE, "port": 5432, "dbname": "postgres",
+                    "user": PG_SUPERUSER, "password": PG_SUPERPASS, "ssl": False,
+                    "ssl-mode": "disable", "tunnel-enabled": False},
+    }, token=token)
+    secret_dir = os.path.join(work, "pinned")
+    write_secret(secret_dir, "lecteur_deux", "un-autre-mot-de-passe")
+    output = run_sync({
+        "DS_COUNT": "1", "DS0_NAME": "nom-de-la-configuration", "DS0_ID": str(migrated["id"]),
+        "DS0_ENGINE": "postgres", "DS0_DIR": secret_dir,
+        "DS0_KEYS": '{"host":"PGHOST","port":"PGPORT","dbname":"PGDATABASE","user":"PGUSER",'
+                    '"password":"PGPASSWORD","ssl-mode":"PGSSLMODE"}',
+        "DS0_EXTRA": '{"ssl":false,"tunnel-enabled":false}',
+    }, 12, work)
+    listing = call("/api/database", token=token)
+    databases = listing["data"] if isinstance(listing, dict) else listing
+    check("aucune source creee sous le nom de la configuration",
+          not any(db.get("name") == "nom-de-la-configuration" for db in databases))
+    after = next((db for db in databases if db["id"] == migrated["id"]), None)
+    details = (after or {}).get("details") or {}
+    check("la source migree est reecrite sur la nouvelle base",
+          details.get("dbname") == PG_DB and details.get("user") == "lecteur_deux", str(details))
+    check("son nom n'est pas touche",
+          (after or {}).get("name") == "SIRENA (anonymise, ancienne instance)")
+    rows = query_rows(token, migrated["id"])
+    check("la source migree est interrogeable apres adoption", rows == [[7]], str(rows))
+    check("aucun mot de passe dans les journaux (epinglage)",
+          "un-autre-mot-de-passe" not in output)
+    print(output.strip()[-600:])
+
+
+def scenario_throttling(work):
+    """Le throttling RÉEL de `/api/session` : 10 échecs dans l'heure verrouillent le compte, et
+    chaque refus compte. On verrouille un compte JETABLE (le verrou est par nom d'utilisateur,
+    qu'il existe ou non), pour ne pas priver la suite de son admin."""
+    print("--- throttling reel : une seule tentative pendant le verrou ---")
+    victim = "verrouille@exemple.fr"
+    for _ in range(11):
+        try:
+            call("/api/session", "POST", {"username": victim, "password": "faux"})
+        except RuntimeError:
+            pass
+    output = run_sync({"MB_ADMIN_EMAIL": victim, "DS_COUNT": "1", "DS0_NAME": "x",
+                       "DS0_DIR": os.path.join(work, "ds0"), "DS0_KEYS": "{}"}, 15, work)
+    attempts = output.count("POST /api/session")
+    check("le verrou est bien celui de Metabase", "Too many attempts" in output, output[-300:])
+    check("une seule tentative en 15 s malgre POLL_SECONDS=2", attempts == 1, str(attempts))
+
+
 def main():
     print("--- attente de Metabase ---")
     wait_ready()
@@ -221,6 +297,9 @@ def main():
           "un-mot-de-passe" not in output and ADMIN_PASSWORD not in output)
     print("--- journal du reconciliateur ---")
     print(output.strip()[-1500:])
+
+    scenario_pinned(token, work)
+    scenario_throttling(work)
     shutil.rmtree(work, ignore_errors=True)
     print("--- {} echec(s) ---".format(len(failures)))
     return 1 if failures else 0

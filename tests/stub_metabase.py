@@ -8,13 +8,17 @@ Un stub plus gentil que la réalité rend la suite verte pour rien. Sont donc re
 - `PUT /api/database/:id` **fusionne** `details` (v0.63.15, warehouses_rest/api.clj) ;
 - un champ ABSENT du corps d'un PUT est remis à son défaut : `is_on_demand` -> false,
   `cache_ttl` -> nil. C'est ainsi qu'un client naïf écrase des réglages qu'il ne possède pas ;
-- toute écriture exige une session valide, et `/api/session` applique un throttling par compte.
+- toute écriture exige une session valide, et `/api/session` applique un throttling par compte ;
+- en mode `throttle_real`, le throttling de Metabase v0.63 tel qu'il est : HTTP 401, corps
+  `{"errors":{"username":"Too many attempts! ..."}}`, mot de passe juste ou non, et chaque refus
+  compte lui-même comme une tentative.
 """
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-STATE = {"databases": [], "next_id": 1, "writes": [], "logins": 0, "throttled": False, "lists": 0}
+STATE = {"databases": [], "next_id": 1, "writes": [], "logins": 0, "throttled": False, "lists": 0,
+         "throttle_real": False}
 ADMIN = {"email": "ops@exemple.fr", "password": "mot-de-passe-admin-jamais-imprime"}
 TOKEN = "session-de-test"
 
@@ -68,6 +72,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/session":
             STATE["logins"] += 1
             body = self._body()
+            if STATE["throttle_real"]:
+                return self._send(401, {"errors": {"username": (
+                    "Too many attempts! You must wait 2 seconds before trying again.")}})
             if STATE["throttled"]:
                 return self._send(429, {"message": "Too many attempts"})
             if (body.get("username"), body.get("password")) != (ADMIN["email"], ADMIN["password"]):

@@ -34,6 +34,10 @@ pub const RESERVED: [&str; 3] = ["is_sample", "is_audit", "is_attached_dwh"];
 
 pub struct DataSource {
     pub name: String,
+    /// Identifiant Metabase de la source à adopter. Posé, il prime sur le nom et l'adressage, et
+    /// interdit toute création : c'est la seule clé qui survive à une migration d'instance, où le
+    /// nom vient de l'ancienne instance et l'adresse change par définition.
+    pub id: Option<i64>,
     pub engine: String,
     pub dir: PathBuf,
     pub keys: BTreeMap<String, String>,
@@ -87,14 +91,11 @@ impl DataSource {
         databases: &'a [Value],
         want: &Map<String, Value>,
     ) -> Result<Option<&'a Value>, String> {
-        let usable: Vec<&Value> = databases
-            .iter()
-            .filter(|db| {
-                !RESERVED
-                    .iter()
-                    .any(|flag| db.get(*flag) == Some(&Value::Bool(true)))
-            })
-            .collect();
+        if let Some(id) = self.id {
+            return self.find_pinned(databases, id).map(Some);
+        }
+
+        let usable: Vec<&Value> = databases.iter().filter(|db| !is_reserved(db)).collect();
 
         let by_name: Vec<&&Value> = usable
             .iter()
@@ -142,6 +143,42 @@ impl DataSource {
         }
         Ok(candidates.first().copied().copied())
     }
+
+    /// Une source épinglée par identifiant existe, n'est pas réservée et porte le bon moteur — ou
+    /// c'est une erreur. Jamais `None` : l'absence d'une source épinglée ne doit pas déboucher sur
+    /// une création, qui produirait précisément le doublon que l'épinglage sert à éviter.
+    fn find_pinned<'a>(&self, databases: &'a [Value], id: i64) -> Result<&'a Value, String> {
+        let found = databases
+            .iter()
+            .find(|db| db.get("id").and_then(Value::as_i64) == Some(id))
+            .ok_or_else(|| {
+                format!(
+                    "la source id {id} ('{}') est introuvable dans Metabase — refus de la créer, \
+                     l'identifiant est épinglé",
+                    self.name
+                )
+            })?;
+        if is_reserved(found) {
+            return Err(format!(
+                "la source id {id} est une base réservée de Metabase — refus de la réécrire"
+            ));
+        }
+        let engine = found.get("engine").and_then(Value::as_str).unwrap_or("");
+        if engine != self.engine {
+            return Err(format!(
+                "la source id {id} existe avec le moteur '{engine}', attendu '{}' — refus de la \
+                 réécrire",
+                self.engine
+            ));
+        }
+        Ok(found)
+    }
+}
+
+fn is_reserved(db: &Value) -> bool {
+    RESERVED
+        .iter()
+        .any(|flag| db.get(*flag) == Some(&Value::Bool(true)))
 }
 
 /// Rend un champ JSON sous une forme comparable, quel que soit son type d'origine : un port peut
@@ -190,6 +227,7 @@ mod tests {
     fn source() -> DataSource {
         DataSource {
             name: "Cible".into(),
+            id: None,
             engine: "postgres".into(),
             dir: PathBuf::from("/nowhere"),
             keys: BTreeMap::new(),
@@ -243,6 +281,56 @@ mod tests {
     fn refuse_de_reecrire_une_source_dun_autre_moteur() {
         let dbs = vec![json!({"id": 1, "name": "Cible", "engine": "mysql", "details": {}})];
         let err = source().find_existing(&dbs, &want()).unwrap_err();
+        assert!(
+            err.contains("refus de la réécrire"),
+            "message inattendu : {err}"
+        );
+    }
+
+    fn pinned(id: i64) -> DataSource {
+        DataSource {
+            id: Some(id),
+            ..source()
+        }
+    }
+
+    /// Le cas d'une instance migrée : la source à adopter porte le nom de l'ancienne instance et
+    /// vise l'ancien hôte, tandis qu'une source homonyme de la configuration existe ailleurs.
+    #[test]
+    fn un_id_epingle_prime_sur_le_nom_et_ladressage() {
+        let dbs = vec![
+            json!({"id": 2, "name": "Ancien nom", "engine": "postgres",
+                   "details": {"host": "ancien-hote", "port": 5432, "dbname": "app"}}),
+            json!({"id": 5, "name": "Cible", "engine": "postgres",
+                   "details": {"host": "h", "port": 5432, "dbname": "app"}}),
+        ];
+        let found = pinned(2).find_existing(&dbs, &want()).unwrap().unwrap();
+        assert_eq!(found.get("id").and_then(Value::as_i64), Some(2));
+    }
+
+    #[test]
+    fn un_id_epingle_absent_est_une_erreur_jamais_une_creation() {
+        // Une homonyme existe : un repli sur le nom l'adopterait en silence, une absence de
+        // résultat ferait créer un doublon. Les deux sont des fautes.
+        let dbs = vec![json!({"id": 5, "name": "Cible", "engine": "postgres", "details": {}})];
+        let err = pinned(2).find_existing(&dbs, &want()).unwrap_err();
+        assert!(err.contains("introuvable"), "message inattendu : {err}");
+    }
+
+    #[test]
+    fn un_id_epingle_sur_une_base_reservee_est_refuse() {
+        let dbs = vec![
+            json!({"id": 1, "name": "Sample Database", "engine": "postgres",
+                              "is_sample": true, "details": {}}),
+        ];
+        let err = pinned(1).find_existing(&dbs, &want()).unwrap_err();
+        assert!(err.contains("réservée"), "message inattendu : {err}");
+    }
+
+    #[test]
+    fn un_id_epingle_dun_autre_moteur_est_refuse() {
+        let dbs = vec![json!({"id": 2, "name": "Cible", "engine": "mysql", "details": {}})];
+        let err = pinned(2).find_existing(&dbs, &want()).unwrap_err();
         assert!(
             err.contains("refus de la réécrire"),
             "message inattendu : {err}"

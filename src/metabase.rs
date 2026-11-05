@@ -16,10 +16,22 @@ use crate::redact;
 /// tronque.
 const ERROR_BODY_MAX: usize = 400;
 
+/// Fenêtre du throttling de `/api/session` (bibliothèque `metabase/throttle` 1.0.2, utilisée par
+/// Metabase v0.63) : une connexion est refusée tant que le compte cumule au moins 10 échecs dans
+/// l'heure écoulée, mot de passe juste ou non, et CHAQUE refus compte lui-même comme un échec.
+/// Le « You must wait N seconds » du message n'est qu'un texte, pas l'échéance du verrou : seule
+/// l'expiration des tentatives, une heure après chacune, le lève.
+const THROTTLE_WINDOW: Duration = Duration::from_secs(3600);
+
+/// Marge au-delà de la fenêtre : une tentative arrivée une fraction trop tôt relancerait le verrou.
+const THROTTLE_MARGIN: Duration = Duration::from_secs(60);
+
 #[derive(Debug)]
 pub struct ApiError {
     pub status: Option<u16>,
     pub message: String,
+    /// Délai minimal avant la prochaine tentative, quand Metabase signale un throttling.
+    pub imposed_wait: Option<Duration>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -33,8 +45,33 @@ impl ApiError {
         ApiError {
             status: None,
             message,
+            imposed_wait: None,
         }
     }
+}
+
+/// Délai minimal avant de retenter, si le corps signale le throttling de `/api/session` :
+/// `{"errors":{"username":"Too many attempts! You must wait 1167 seconds before trying again."}}`,
+/// ou `"Too many attempts! Please try again later."` une fois le délai affiché écoulé alors que le
+/// verrou tient toujours. Metabase ne pose pas d'en-tête `Retry-After` : le texte est la seule
+/// trace. Le délai affiché est un plancher, la fenêtre complète en est un autre.
+fn imposed_wait(body: &str) -> Option<Duration> {
+    if !body.contains("Too many attempts") {
+        return None;
+    }
+    let announced = announced_seconds(body).unwrap_or(Duration::ZERO);
+    Some(announced.max(THROTTLE_WINDOW) + THROTTLE_MARGIN)
+}
+
+fn announced_seconds(body: &str) -> Option<Duration> {
+    const MARKER: &str = "must wait ";
+    let rest = &body[body.find(MARKER)? + MARKER.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let seconds: u64 = digits.parse().ok()?;
+    rest[digits.len()..]
+        .trim_start()
+        .starts_with("second")
+        .then(|| Duration::from_secs(seconds))
 }
 
 pub struct Metabase {
@@ -186,6 +223,7 @@ impl Metabase {
             return Err(ApiError {
                 status: Some(status),
                 message: format!("{method} {path} -> HTTP {status} : {detail}"),
+                imposed_wait: imposed_wait(&raw),
             });
         }
 
@@ -199,12 +237,21 @@ impl Metabase {
 
     /// Temporisation croissante et dispersée après un échec d'authentification, pour ne pas
     /// maintenir le compte sous throttling.
-    pub fn backoff(&mut self, poll: Duration) -> Duration {
+    ///
+    /// Un délai imposé est un plancher, pas une indication : Metabase compte aussi les tentatives
+    /// faites PENDANT le verrou (observé en production : 1167 s, puis 1286 s 55 s plus tard, puis
+    /// 1355 s). Retenter avant l'expiration de la fenêtre entretient le verrou du compte admin —
+    /// partagé avec des humains — au lieu d'en sortir.
+    pub fn backoff(&mut self, poll: Duration, imposed: Option<Duration>) -> Duration {
         self.auth_failures = self.auth_failures.saturating_add(1);
         let exponent = self.auth_failures.min(5);
         let base = poll.as_secs_f64() * 2f64.powi(exponent as i32);
         let capped = base.min(300.0);
-        Duration::from_secs_f64(capped * (0.5 + jitter() / 2.0))
+        let spread = Duration::from_secs_f64(capped * (0.5 + jitter() / 2.0));
+        match imposed {
+            Some(wait) => spread.max(wait),
+            None => spread,
+        }
     }
 }
 
@@ -216,4 +263,53 @@ fn jitter() -> f64 {
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
     f64::from(nanos % 1_000) / 1_000.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn le_throttling_impose_au_moins_la_fenetre_complete() {
+        // Corps réel renvoyé par Metabase v0.63 sous throttling (HTTP 401) : les 1167 s affichées
+        // ne lèvent pas le verrou, seule l'expiration de la fenêtre d'une heure le fait.
+        let body = r#"{"errors":{"username":"Too many attempts! You must wait 1167 seconds before trying again."}}"#;
+        assert_eq!(imposed_wait(body), Some(THROTTLE_WINDOW + THROTTLE_MARGIN));
+    }
+
+    #[test]
+    fn un_delai_affiche_plus_long_que_la_fenetre_est_respecte() {
+        let body = r#"{"errors":{"username":"Too many attempts! You must wait 5000 seconds before trying again."}}"#;
+        assert_eq!(
+            imposed_wait(body),
+            Some(Duration::from_secs(5000) + THROTTLE_MARGIN)
+        );
+    }
+
+    #[test]
+    fn le_throttling_sans_delai_affiche_est_reconnu() {
+        let body = r#"{"errors":{"username":"Too many attempts! Please try again later."}}"#;
+        assert_eq!(imposed_wait(body), Some(THROTTLE_WINDOW + THROTTLE_MARGIN));
+    }
+
+    #[test]
+    fn un_mauvais_mot_de_passe_nest_pas_un_throttling() {
+        assert_eq!(
+            imposed_wait(r#"{"errors":{"password":"did not match stored password"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn le_delai_impose_est_un_plancher() {
+        let mut session = Metabase::new(
+            "http://x",
+            "a@b",
+            Path::new("/nowhere"),
+            Duration::from_secs(1),
+        );
+        let floor = Duration::from_secs(3660);
+        let delay = session.backoff(Duration::from_secs(30), Some(floor));
+        assert!(delay >= floor, "délai trop court : {delay:?}");
+    }
 }

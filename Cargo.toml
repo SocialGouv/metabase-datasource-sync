@@ -1,6 +1,6 @@
 [package]
 name = "metabase-datasource-sync"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 # Plancher réel de l'arbre de dépendances (le plus haut des `rust-version` verrouillés : les crates
 # `icu_*` 2.3 et `time` 0.3), et version du canal épinglé dans `rust-toolchain.toml` : le contrat
